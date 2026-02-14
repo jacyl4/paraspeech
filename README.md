@@ -32,55 +32,63 @@
             OpenAI / Deepgram / Edge
 ```
 
-### 分层结构
+### 核心分层
 
-| 层 | 职责 | 包 |
-|----|------|----|
-| L1 Transport | 协议适配 | `transport/grpc`, `transport/cli` |
-| L2 Handler | 参数校验、trace 注入 | `transport/grpc/*_handler` |
-| L3 Service | 业务编排（decode→VAD→转写 / sanitize→split→合成） | `stt`, `tts` |
-| L4 Domain | 核心算法与抽象 | `codec`, `vad`, `voice`, `queue` |
-| L5 Infra | 配置、密钥、日志、错误码 | `config`, `vault`, `observe`, `errs` |
-| L5 Provider | 上游 API 对接 | `provider/openai`, `provider/deepgram` |
+| 层 | 角色 | 关键职责 | 约束 |
+|----|------|----------|------|
+| Transport | `grpc` / `cli` | 协议入口、参数接收、输出格式化 | 不做业务决策，不直接调上游 |
+| Service | `stt` / `tts` | 编排完整业务链路 | 仅依赖 domain/infra/provider 抽象 |
+| Domain | `codec` / `vad` / `voice` / `queue` | 语音处理与策略算法 | 与具体上游 API 解耦 |
+| Provider | `provider/openai` | 封装上游 HTTP 协议细节 | 不关心调用来源（CLI/gRPC） |
+| Infra | `config` / `vault` / `observe` / `errs` | 配置、密钥、日志、错误模型 | 全局可复用，避免业务入侵 |
 
-依赖方向：L1 → L2 → L3 → L4/L5，禁止反向引用。
+依赖方向固定：`Transport -> Service -> Domain/Provider/Infra`。
 
-### 运行逻辑
+### 业务链路（STT）
 
-**STT 流水线**：Telegram 语音到达 → 立即启动 ffmpeg pipe 解码（16kHz mono s16le）→ TEN VAD 逐帧检测 → 段合并与裁剪 → OpenAI 批量转写 → 返回文本。前三级（下载/解码/VAD）流式并行。
+1. 客户端调用 `STTService.Transcribe` 或 `paraspeech transcribe`。
+2. 服务先将任意输入音频统一解码为 `16kHz / mono / s16le`。
+3. 若 `vad.mode != off`，执行 VAD 裁剪并生成 VAD 元数据。
+4. 将 PCM 封装为标准 WAV 后上传 OpenAI STT。
+5. 返回文本与元信息（trace/process/vad），CLI 默认只输出 `text`。
 
-**TTS 流水线**：文本输入 → markdown/代码/URL 清洗 → 按段落/换行边界分段（保留标点不切，句中不断）→ 逐段调用 OpenAI TTS → 拼接音频返回。
+设计要点：
 
-**密钥安全**：`paraspeech serve` 以专用用户运行，密钥文件 `0640 root:paraspeech`。CLI 以普通用户运行，通过 gRPC 委托 serve 完成操作，全程不接触密钥。OpenClaw（LLM agent）无法通过 `cat`/`env`/`/proc` 等任何方式获取密钥。
+- 输入格式不可信，先统一解码再处理。
+- 上游识别以 WAV 容器作为稳定交付格式。
+- VAD 失败时走回退，不阻断主链路。
 
----
+### 业务链路（TTS）
 
-## 目录布局
+1. 客户端调用 `TTSService.Synthesize` 或 `paraspeech synthesize`。
+2. 文本先做 sanitize（去 markdown/代码块/URL 噪声）。
+3. 按时长和语义边界分段，避免句中硬切。
+4. 逐段调用 OpenAI TTS 并聚合输出。
+5. 返回段信息与音频结果（CLI 侧默认精简输出）。
 
-```
-paraspeech/
-├── cmd/paraspeech/main.go          # 入口
-├── internal/
-│   ├── config/                     # TOML 配置 + 环境变量覆盖
-│   ├── vault/                      # 密钥金库（SIGHUP 热重载 + mlock + memzero）
-│   ├── codec/                      # ffmpeg pipe 封装（零磁盘 IO）
-│   ├── vad/                        # TEN VAD 接口 + 段合并算法
-│   ├── stt/                        # STT 业务编排
-│   ├── tts/                        # TTS 业务编排 + 文本清洗 + 分段
-│   ├── voice/                      # VoiceProfile 抽象 + Provider 适配
-│   ├── provider/openai/            # OpenAI STT/TTS HTTP 客户端
-│   ├── queue/                      # 令牌桶限流
-│   ├── transport/grpc/             # gRPC server + handler
-│   ├── transport/cli/              # CLI 子命令（纯委托 gRPC）
-│   ├── observe/                    # 日志（敏感字段 redact）、trace、metrics
-│   └── errs/                       # 统一错误码
-├── api/proto/paraspeech/v1/        # Proto 定义（stt, tts, health, common）
-├── configs/                        # systemd unit 模板
-├── scripts/                        # CLI wrapper（兼容旧命令名）
-├── third_party/ten-vad/            # TEN VAD 预编译库 + 版本锁定
-├── Makefile
-└── ARCHITECTURE.md                 # 完整架构文档（2200+ 行）
-```
+设计要点：
+
+- 清洗与分段是稳定性的关键，不把脏输入直接交给上游。
+- 多段聚合保证长文本场景可控。
+
+### 运行边界与安全模型
+
+1. `paraspeech serve` 是唯一持有密钥的进程。
+2. CLI 仅通过本地 gRPC 委托，不直接触达上游。
+3. 密钥文件以 `root:paraspeech` + `0640` 权限管理。
+4. 支持 `systemctl reload` 热重载密钥，旧密钥内存会清零。
+
+### 实现映射（最小）
+
+只列核心映射，便于定位逻辑：
+
+- STT 编排：`internal/stt/service.go`
+- TTS 编排：`internal/tts/service.go`
+- gRPC 入口：`internal/transport/grpc/`
+- OpenAI 对接：`internal/provider/openai/`
+- 密钥管理：`internal/vault/vault.go`
+- 配置模型：`internal/config/config.go`
+- 对外协议：`api/proto/paraspeech/v1/*.proto`
 
 ---
 
