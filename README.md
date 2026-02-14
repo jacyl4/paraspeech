@@ -80,27 +80,6 @@
 3. 密钥文件以 `root:paraspeech` + `0640` 权限管理。
 4. 支持 `systemctl reload` 热重载密钥，旧密钥内存会清零。
 
-### 当前接口实现状态
-
-- 已实现：`STTService.Transcribe`（unary）
-- 已实现：`STTService.TranscribeStream`（bidi stream）
-- 已实现：`TTSService.Synthesize`（unary）
-- 已实现：`TTSService.Preview`（unary，返回真实清洗+分段结果）
-- 已实现：`HealthService.Check`（unary）
-- 未实现：`TTSService.SynthesizeStream`（调用会返回 `Unimplemented`）
-
-### 实现映射（最小）
-
-只列核心映射，便于定位逻辑：
-
-- STT 编排：`internal/stt/service.go`
-- TTS 编排：`internal/tts/service.go`
-- gRPC 入口：`internal/transport/grpc/`
-- OpenAI 对接：`internal/provider/openai/`
-- 密钥管理：`internal/vault/vault.go`
-- 配置模型：`internal/config/config.go`
-- 对外协议：`api/proto/paraspeech/v1/*.proto`
-
 ---
 
 ## 构建
