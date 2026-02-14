@@ -2,7 +2,7 @@
 
 统一语音中间件 — 将 STT 与 TTS 合并为单一 Go 二进制。
 
-单进程、双通道、gRPC 流式优先、CLI 纯委托、零密钥暴露。
+单进程、双通道、gRPC + CLI 双入口、零密钥暴露。
 
 ---
 
@@ -13,7 +13,7 @@
                        │
           ┌────────────┴────────────┐
           │    gRPC :9800           │   CLI 子命令
-          │   （流式双工）           │  （委托 gRPC）
+          │   （当前 unary）         │  （委托 gRPC）
           └────────────┬────────────┘
                        │
     ┌──────────────────┴──────────────────┐
@@ -77,6 +77,14 @@
 2. CLI 仅通过本地 gRPC 委托，不直接触达上游。
 3. 密钥文件以 `root:paraspeech` + `0640` 权限管理。
 4. 支持 `systemctl reload` 热重载密钥，旧密钥内存会清零。
+
+### 当前接口实现状态
+
+- 已实现：`STTService.Transcribe`（unary）
+- 已实现：`TTSService.Synthesize`（unary）
+- 已实现：`TTSService.Preview`（unary，返回真实清洗+分段结果）
+- 已实现：`HealthService.Check`（unary）
+- 未实现：`STTService.TranscribeStream`、`TTSService.SynthesizeStream`（调用会返回 `Unimplemented`）
 
 ### 实现映射（最小）
 
@@ -202,6 +210,42 @@ sudo systemctl reload paraspeech         # SIGHUP 热重载
 
 **环境变量覆盖**：`PARASPEECH_{SECTION}_{KEY}` 格式，仅非敏感项（含 key/secret/token 的字段被跳过，防止出现在 `/proc/PID/environ`）。
 
+当前版本实际支持的高优先级覆盖项：
+
+- `PARASPEECH_SERVER_GRPC_ADDR`
+- `PARASPEECH_STT_VAD_MODE`
+- `PARASPEECH_TTS_DEFAULT_VOICE`
+
+配置文件查找顺序：
+
+1. `--config <path>`
+2. `PARASPEECH_CONFIG`
+3. `/etc/paraspeech/paraspeech.toml`
+
+---
+
+## 可观测性
+
+### 当前已实现
+
+- 结构化日志：`log.format = json|text`，默认 `json`
+- 日志级别：`log.level = debug|info|warn|error`
+- 日志脱敏：字段名包含 `key/secret/token/sk-` 自动替换为 `[REDACTED]`
+- Trace ID：每次 STT/TTS 请求生成 `trace_id`，写入 gRPC 响应元信息（`meta.trace_id`）
+- 健康检查：`HealthService.Check` 和 `paraspeech health` 可用于存活与基本配置检查
+
+### 预留但未启用（当前版本）
+
+- `server.metrics_addr` 仅为预留配置
+- Prometheus `/metrics` 端点尚未实现
+- gRPC 全局拦截器（统一请求日志/指标采集）尚未接入
+
+### 运维建议（当前版本）
+
+1. 用 `journalctl -u paraspeech -f` 观察运行日志
+2. 用 `paraspeech health` 或 gRPC `HealthService.Check` 做探活
+3. 如需链路排查，优先比对响应中的 `trace_id` 与服务日志时间窗口
+
 ---
 
 ## gRPC 接口
@@ -256,6 +300,8 @@ service HealthService {
 ```
 
 返回各通道状态（enabled、model、vad_mode、vault_ready）。
+
+`paraspeech health` 为精简输出；如需完整通道字段，建议使用 `grpcurl` 直接调用 `HealthService.Check`。
 
 ---
 
