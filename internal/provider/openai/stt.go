@@ -2,11 +2,13 @@ package openai
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"strings"
+	"time"
 
 	"paraspeech/internal/config"
 	"paraspeech/internal/stt"
@@ -19,10 +21,15 @@ type STT struct {
 }
 
 func NewSTT(v vault.Vault, cfg config.Upstream) *STT {
-	return &STT{
-		client: NewSharedClient(v, cfg),
-		cfg:    cfg,
-	}
+	return &STT{client: NewSharedClient(v, cfg), cfg: cfg}
+}
+
+func (s *STT) Prewarm(ctx context.Context, timeout time.Duration) error {
+	return s.client.Prewarm(ctx, s.cfg.Endpoint, timeout)
+}
+
+func (s *STT) Keepalive(ctx context.Context, interval time.Duration) {
+	s.client.Keepalive(ctx, s.cfg.Endpoint, interval)
 }
 
 func (s *STT) transcribeSSE(ctx context.Context, req *stt.TranscribeRequest) (<-chan SSEEvent, <-chan error, error) {
@@ -84,7 +91,6 @@ func (s *STT) transcribeSSE(ctx context.Context, req *stt.TranscribeRequest) (<-
 	if err != nil {
 		return nil, nil, fmt.Errorf("upstream request: %w", err)
 	}
-
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
@@ -96,10 +102,8 @@ func (s *STT) transcribeSSE(ctx context.Context, req *stt.TranscribeRequest) (<-
 	go func() {
 		defer resp.Body.Close()
 		defer close(eventCh)
-		defer close(errCh)
-		errCh <- ParseSSEStream(resp.Body, eventCh)
+		errCh <- ParseSSEStream(ctx, resp.Body, eventCh)
 	}()
-
 	return eventCh, errCh, nil
 }
 
@@ -124,8 +128,7 @@ func (s *STT) Transcribe(ctx context.Context, req *stt.TranscribeRequest) (*stt.
 			}
 		}
 	}
-
-	if parseErr := <-errCh; parseErr != nil {
+	if parseErr := <-errCh; parseErr != nil && !errors.Is(parseErr, context.Canceled) {
 		return nil, fmt.Errorf("parse sse: %w", parseErr)
 	}
 	return &stt.TranscribeResult{Text: text.String()}, nil
@@ -136,36 +139,22 @@ func (s *STT) TranscribeStreamSSE(ctx context.Context, req *stt.TranscribeReques
 	if err != nil {
 		return err
 	}
-
 	for event := range eventCh {
 		switch event.Type {
 		case "transcript.text.delta":
-			out <- event.Delta
-		case "transcript.text.done":
-			if parseErr := <-errCh; parseErr != nil {
-				return fmt.Errorf("parse sse: %w", parseErr)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case out <- event.Delta:
 			}
-			return nil
 		case "error":
 			if event.Error != "" {
 				return fmt.Errorf("upstream stream error: %s", event.Error)
 			}
 		}
 	}
-
-	if parseErr := <-errCh; parseErr != nil {
+	if parseErr := <-errCh; parseErr != nil && !errors.Is(parseErr, context.Canceled) {
 		return fmt.Errorf("parse sse: %w", parseErr)
-	}
-	return nil
-}
-
-func (s *STT) TranscribeStream(ctx context.Context, req *stt.TranscribeRequest, out chan<- *stt.Segment) error {
-	result, err := s.Transcribe(ctx, req)
-	if err != nil {
-		return err
-	}
-	if result.Text != "" {
-		out <- &stt.Segment{Index: 0, Text: result.Text}
 	}
 	return nil
 }

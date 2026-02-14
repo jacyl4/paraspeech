@@ -59,16 +59,16 @@ message TranscribeEvent {
 }
 
 message PartialResult {
-    int32 index = 1;
-    double start_sec = 2;
-    double end_sec = 3;
+    reserved 1;
+    reserved 2;
+    reserved 3;
     string text = 4;
     string accumulated_text = 5;
 }
 
 message FinalResult {
     string text = 1;
-    int32 chunks = 2;
+    reserved 2;
     TranscribeMeta meta = 3;
 }
 

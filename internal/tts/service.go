@@ -1,10 +1,11 @@
 package tts
 
 import (
-	"bytes"
 	"context"
-	"io"
 	"log/slog"
+	"strings"
+
+	"golang.org/x/sync/errgroup"
 
 	"paraspeech/internal/config"
 	"paraspeech/internal/errs"
@@ -13,7 +14,6 @@ import (
 
 type Service struct {
 	provider Synthesizer
-	adapter  voice.ProviderAdapter
 	cfg      config.TTS
 }
 
@@ -32,37 +32,173 @@ type SegmentResult struct {
 	ContentType  string
 }
 
-func NewService(provider Synthesizer, adapter voice.ProviderAdapter, cfg config.TTS) *Service {
-	return &Service{
-		provider: provider,
-		adapter:  adapter,
-		cfg:      cfg,
-	}
+type synthesisParams struct {
+	profile    *voice.VoiceProfile
+	model      string
+	format     string
+	segments   []TextSegment
+	cleanedLen int
 }
 
-func (s *Service) Synthesize(ctx context.Context, text string, profile *voice.VoiceProfile) (*SynthesizeResult, error) {
-	segments, err := s.SynthesizeSegments(ctx, text, profile, nil)
-	if err != nil {
-		return nil, err
-	}
-	var allAudio bytes.Buffer
-	contentType := "audio/ogg"
-	for _, seg := range segments {
-		if _, err := allAudio.Write(seg.Audio); err != nil {
-			return nil, errs.Wrap(errs.ErrInternal, err)
-		}
-		if seg.ContentType != "" {
-			contentType = seg.ContentType
-		}
-	}
-	return &SynthesizeResult{
-		Audio:       bytes.NewReader(allAudio.Bytes()),
-		ContentType: contentType,
-		SizeBytes:   int64(allAudio.Len()),
-	}, nil
+func NewService(provider Synthesizer, cfg config.TTS) *Service {
+	return &Service{provider: provider, cfg: cfg}
 }
 
 func (s *Service) SynthesizeSegments(ctx context.Context, text string, profile *voice.VoiceProfile, opt *SynthesizeOptions) ([]SegmentResult, error) {
+	params, err := s.prepareSynthesisRequest(text, profile, opt)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("tts segments", "count", len(params.segments), "text_len", params.cleanedLen)
+
+	n := len(params.segments)
+	if n == 1 {
+		seg := params.segments[0]
+		upstream, err := s.provider.Synthesize(ctx, &SynthesizeRequest{
+			Text:         seg.Text,
+			VoiceProfile: params.profile,
+			Model:        params.model,
+			Format:       params.format,
+		})
+		if err != nil {
+			return nil, errs.Wrap(errs.ErrTTSUpstream, err)
+		}
+		return []SegmentResult{{
+			Index:        0,
+			Text:         seg.Text,
+			EstimatedSec: seg.EstimatedSec,
+			Audio:        upstream.Audio,
+			SizeBytes:    int64(len(upstream.Audio)),
+			ContentType:  upstream.ContentType,
+		}}, nil
+	}
+
+	limit := s.cfg.MaxParallel
+	if limit <= 0 {
+		limit = 1
+	}
+	result := make([]SegmentResult, n)
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(limit)
+	for i, seg := range params.segments {
+		i, seg := i, seg
+		g.Go(func() error {
+			upstream, err := s.provider.Synthesize(gctx, &SynthesizeRequest{
+				Text:         seg.Text,
+				VoiceProfile: params.profile,
+				Model:        params.model,
+				Format:       params.format,
+			})
+			if err != nil {
+				return errs.Wrap(errs.ErrTTSUpstream, err)
+			}
+			result[i] = SegmentResult{
+				Index:        i,
+				Text:         seg.Text,
+				EstimatedSec: seg.EstimatedSec,
+				Audio:        upstream.Audio,
+				SizeBytes:    int64(len(upstream.Audio)),
+				ContentType:  upstream.ContentType,
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *Service) SynthesizeStreamSegments(ctx context.Context, text string, profile *voice.VoiceProfile, opt *SynthesizeOptions, onSegment func(SegmentResult) error) (int, error) {
+	params, err := s.prepareSynthesisRequest(text, profile, opt)
+	if err != nil {
+		return 0, err
+	}
+	slog.Info("tts stream segments", "count", len(params.segments), "text_len", params.cleanedLen)
+
+	n := len(params.segments)
+	if n == 1 {
+		seg := params.segments[0]
+		upstream, err := s.provider.Synthesize(ctx, &SynthesizeRequest{
+			Text:         seg.Text,
+			VoiceProfile: params.profile,
+			Model:        params.model,
+			Format:       params.format,
+		})
+		if err != nil {
+			return 0, errs.Wrap(errs.ErrTTSUpstream, err)
+		}
+		if err := onSegment(SegmentResult{
+			Index:        0,
+			Text:         seg.Text,
+			EstimatedSec: seg.EstimatedSec,
+			Audio:        upstream.Audio,
+			SizeBytes:    int64(len(upstream.Audio)),
+			ContentType:  upstream.ContentType,
+		}); err != nil {
+			return 0, err
+		}
+		return 1, nil
+	}
+
+	type slotResult struct {
+		seg SegmentResult
+		err error
+	}
+	slots := make([]chan slotResult, n)
+	for i := range slots {
+		slots[i] = make(chan slotResult, 1)
+	}
+
+	limit := s.cfg.MaxParallel
+	if limit <= 0 {
+		limit = 1
+	}
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(limit)
+	for i, seg := range params.segments {
+		i, seg := i, seg
+		slot := slots[i]
+		g.Go(func() error {
+			upstream, err := s.provider.Synthesize(gctx, &SynthesizeRequest{
+				Text:         seg.Text,
+				VoiceProfile: params.profile,
+				Model:        params.model,
+				Format:       params.format,
+			})
+			if err != nil {
+				err = errs.Wrap(errs.ErrTTSUpstream, err)
+				slot <- slotResult{err: err}
+				return err
+			}
+			slot <- slotResult{seg: SegmentResult{
+				Index:        i,
+				Text:         seg.Text,
+				EstimatedSec: seg.EstimatedSec,
+				Audio:        upstream.Audio,
+				SizeBytes:    int64(len(upstream.Audio)),
+				ContentType:  upstream.ContentType,
+			}}
+			return nil
+		})
+	}
+
+	for _, slot := range slots {
+		r := <-slot
+		if r.err != nil {
+			return 0, r.err
+		}
+		if err := onSegment(r.seg); err != nil {
+			return 0, err
+		}
+	}
+	if err := g.Wait(); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func (s *Service) prepareSynthesisRequest(text string, profile *voice.VoiceProfile, opt *SynthesizeOptions) (*synthesisParams, error) {
 	cleaned := Sanitize(text)
 	if cleaned == "" {
 		return nil, errs.New(errs.ErrEmptyInput, "empty text after sanitization")
@@ -98,36 +234,22 @@ func (s *Service) SynthesizeSegments(ctx context.Context, text string, profile *
 			maxSec = opt.MaxSec
 		}
 	}
+	format = normalizeAudioFormat(format)
+	return &synthesisParams{
+		profile:    profile,
+		model:      model,
+		format:     format,
+		segments:   Split(cleaned, maxSec),
+		cleanedLen: len(cleaned),
+	}, nil
+}
 
-	segments := Split(cleaned, maxSec)
-	slog.Info("tts segments", "count", len(segments), "text_len", len(cleaned))
-
-	result := make([]SegmentResult, 0, len(segments))
-	for i, seg := range segments {
-		upstream, err := s.provider.Synthesize(ctx, &SynthesizeRequest{
-			Text:         seg.Text,
-			VoiceProfile: profile,
-			Model:        model,
-			Format:       format,
-		})
-		if err != nil {
-			return nil, errs.WithDetails(errs.ErrTTSUpstream, "upstream synthesis failed", map[string]any{
-				"segment_index": i,
-				"segment_text":  seg.Text,
-			})
-		}
-		audioBytes, err := io.ReadAll(upstream.Audio)
-		if err != nil {
-			return nil, errs.Wrap(errs.ErrInternal, err)
-		}
-		result = append(result, SegmentResult{
-			Index:        i,
-			Text:         seg.Text,
-			EstimatedSec: seg.EstimatedSec,
-			Audio:        audioBytes,
-			SizeBytes:    int64(len(audioBytes)),
-			ContentType:  upstream.ContentType,
-		})
+func normalizeAudioFormat(format string) string {
+	f := strings.ToLower(strings.TrimSpace(format))
+	switch f {
+	case "ogg", "opus", "audio/ogg", "audio/opus", "ogg/opus", "audio/ogg;codecs=opus", "audio/ogg; codecs=opus":
+		return "opus"
+	default:
+		return f
 	}
-	return result, nil
 }

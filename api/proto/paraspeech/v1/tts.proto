@@ -12,21 +12,21 @@ service TTSService {
 
 message SynthesizeRequest {
     string text = 1;
-    string session = 2;
+    reserved 2;
     VoiceProfile voice_profile = 3;
     string model = 4;
     string format = 5;
     double max_sec = 6;
-    string out_dir = 7;
+    reserved 7;
 }
 
 message VoiceProfile {
     string voice = 1;
     double speed = 2;
     string emotion = 3;
-    string pitch = 4;
+    reserved 4;
     string style = 5;
-    map<string, string> custom = 6;
+    reserved 6;
 }
 
 message SynthesizeResponse {
@@ -40,7 +40,7 @@ message SynthesizeSegment {
     string text = 2;
     double estimated_sec = 3;
     bytes audio = 4;
-    string path = 5;
+    reserved 5;
     int64 size_bytes = 6;
     string content_type = 7;
 }
@@ -73,7 +73,7 @@ message SegmentDone {
     string text = 2;
     double estimated_sec = 3;
     int64 size_bytes = 4;
-    string path = 5;
+    reserved 5;
 }
 
 message SynthesizeError {

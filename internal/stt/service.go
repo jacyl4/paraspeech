@@ -45,12 +45,7 @@ type Service struct {
 }
 
 func NewService(detector vad.Detector, merger vad.SegmentMerger, provider Transcriber, cfg config.STT) *Service {
-	return &Service{
-		detector: detector,
-		merger:   merger,
-		provider: provider,
-		cfg:      cfg,
-	}
+	return &Service{detector: detector, merger: merger, provider: provider, cfg: cfg}
 }
 
 func (s *Service) chooseRoute(durationHint float64, audioSize int64) route {
@@ -78,11 +73,7 @@ func (s *Service) prepareDirectUpload(ctx context.Context, audio io.Reader, file
 	head, _ := reader.Peek(64)
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(filename)))
 	if isOggOpus(ext, head) {
-		r, err := codec.RemuxToWebm(ctx, reader)
-		if err != nil {
-			return nil, "", err
-		}
-		return r, "audio.webm", nil
+		return io.NopCloser(reader), "audio.ogg", nil
 	}
 	if isWebm(ext, head) {
 		return io.NopCloser(reader), "audio.webm", nil
@@ -108,44 +99,46 @@ func isWebm(ext string, head []byte) bool {
 	return len(head) >= 4 && bytes.Equal(head[:4], []byte{0x1A, 0x45, 0xDF, 0xA3})
 }
 
-func (s *Service) Transcribe(ctx context.Context, audio io.Reader, filename string, durationHint float64, audioSize int64, language, model, prompt string) (*TranscribeResult, error) {
-	if audioSize <= 0 {
-		if b, err := io.ReadAll(audio); err == nil {
-			audioSize = int64(len(b))
-			audio = bytes.NewReader(b)
-		} else {
-			return nil, errs.Wrap(errs.ErrSTTDecodeFailed, err)
-		}
-	}
-
-	r := s.chooseRoute(durationHint, audioSize)
-	if r == routeDirect {
-		directReader, uploadName, err := s.prepareDirectUpload(ctx, audio, filename)
-		if err != nil {
-			return nil, errs.Wrap(errs.ErrSTTDecodeFailed, err)
-		}
-		defer directReader.Close()
-
-		result, err := s.provider.Transcribe(ctx, &TranscribeRequest{
-			Audio:    directReader,
-			Filename: uploadName,
-			Language: language,
-			Prompt:   prompt,
-			Model:    s.resolveModel(model),
-		})
-		if err != nil {
-			return nil, errs.Wrap(errs.ErrSTTUpstream, err)
-		}
-		result.VadMeta = &VadMeta{Enabled: false, Reason: "direct_route"}
-		_ = filename
-		return result, nil
-	}
-
-	audioBytes, err := io.ReadAll(audio)
+func (s *Service) transcribeDirect(ctx context.Context, audio io.Reader, filename, language, model, prompt string) (*TranscribeResult, error) {
+	directReader, uploadName, err := s.prepareDirectUpload(ctx, audio, filename)
 	if err != nil {
 		return nil, errs.Wrap(errs.ErrSTTDecodeFailed, err)
 	}
+	defer func() { _ = directReader.Close() }()
 
+	result, err := s.provider.Transcribe(ctx, &TranscribeRequest{Audio: directReader, Filename: uploadName, Language: language, Prompt: prompt, Model: s.resolveModel(model)})
+	if err != nil && uploadName == "audio.ogg" && isUpstreamFormatRejected(err) {
+		rs, ok := audio.(io.ReadSeeker)
+		if ok {
+			if _, seekErr := rs.Seek(0, io.SeekStart); seekErr == nil {
+				remuxed, remuxErr := codec.RemuxToWebm(ctx, rs)
+				if remuxErr != nil {
+					return nil, errs.Wrap(errs.ErrSTTDecodeFailed, remuxErr)
+				}
+				defer func() { _ = remuxed.Close() }()
+				result, err = s.provider.Transcribe(ctx, &TranscribeRequest{Audio: remuxed, Filename: "audio.webm", Language: language, Prompt: prompt, Model: s.resolveModel(model)})
+			}
+		}
+	}
+	if err != nil {
+		return nil, errs.Wrap(errs.ErrSTTUpstream, err)
+	}
+	result.VadMeta = &VadMeta{Enabled: false, Reason: "direct_route"}
+	return result, nil
+}
+
+func isUpstreamFormatRejected(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "upstream 400") {
+		return false
+	}
+	return strings.Contains(msg, "format") || strings.Contains(msg, "file") || strings.Contains(msg, "unsupported") || strings.Contains(msg, "invalid")
+}
+
+func (s *Service) transcribeVAD(ctx context.Context, audioBytes []byte, language, model, prompt string) (*TranscribeResult, error) {
 	pcm, err := codec.Decode(ctx, bytes.NewReader(audioBytes))
 	if err != nil {
 		return nil, errs.Wrap(errs.ErrSTTDecodeFailed, err)
@@ -161,43 +154,58 @@ func (s *Service) Transcribe(ctx context.Context, audio io.Reader, filename stri
 			vadMeta.ElapsedMS = time.Since(start).Milliseconds()
 		}
 		if err != nil {
-			slog.Warn("VAD failed, falling back to raw audio", "error", err)
-			vadMeta = &VadMeta{
-				Enabled:  true,
-				Fallback: true,
-				Reason:   fmt.Sprintf("vad_error:%T", err),
+			slog.Warn("VAD failed, fallback to direct upload", "error", err)
+			fallback, ferr := s.transcribeDirect(ctx, bytes.NewReader(audioBytes), "audio.bin", language, model, prompt)
+			if ferr != nil {
+				return nil, ferr
 			}
-			fallbackPCM, decodeErr := codec.Decode(ctx, bytes.NewReader(audioBytes))
-			if decodeErr != nil {
-				return nil, errs.Wrap(errs.ErrSTTDecodeFailed, decodeErr)
-			}
-			defer fallbackPCM.Close()
-			trimmedAudio = fallbackPCM
+			fallback.VadMeta = &VadMeta{Enabled: true, Fallback: true, Reason: fmt.Sprintf("vad_error:%T", err)}
+			return fallback, nil
 		}
 	}
 
-	wavAudio, err := toWAVAudio(trimmedAudio)
+	encoded, err := codec.EncodeToWebmOpus(ctx, trimmedAudio)
 	if err != nil {
 		return nil, errs.Wrap(errs.ErrSTTDecodeFailed, err)
 	}
+	defer encoded.Close()
 
-	result, err := s.provider.Transcribe(ctx, &TranscribeRequest{
-		Audio:    bytes.NewReader(wavAudio),
-		Filename: "audio.wav",
-		Language: language,
-		Prompt:   prompt,
-		Model:    s.resolveModel(model),
-	})
+	result, err := s.provider.Transcribe(ctx, &TranscribeRequest{Audio: encoded, Filename: "audio.webm", Language: language, Prompt: prompt, Model: s.resolveModel(model)})
 	if err != nil {
 		return nil, errs.Wrap(errs.ErrSTTUpstream, err)
 	}
 	result.VadMeta = vadMeta
-	_ = filename
 	return result, nil
 }
 
+func (s *Service) Transcribe(ctx context.Context, audio io.Reader, filename string, durationHint float64, audioSize int64, language, model, prompt string) (*TranscribeResult, error) {
+	var cached []byte
+	if audioSize <= 0 {
+		b, err := io.ReadAll(audio)
+		if err != nil {
+			return nil, errs.Wrap(errs.ErrSTTDecodeFailed, err)
+		}
+		cached = b
+		audioSize = int64(len(b))
+		audio = bytes.NewReader(b)
+	}
+
+	r := s.chooseRoute(durationHint, audioSize)
+	if r == routeDirect {
+		return s.transcribeDirect(ctx, audio, filename, language, model, prompt)
+	}
+	if cached != nil {
+		return s.transcribeVAD(ctx, cached, language, model, prompt)
+	}
+
+	audioBytes, err := io.ReadAll(audio)
+	if err != nil {
+		return nil, errs.Wrap(errs.ErrSTTDecodeFailed, err)
+	}
+	return s.transcribeVAD(ctx, audioBytes, language, model, prompt)
+}
+
 func (s *Service) TranscribeStream(ctx context.Context, audio io.Reader, filename string, durationHint float64, audioSize int64, language, model, prompt string, out chan<- *TranscribeEvent) error {
-	_ = filename
 	r := s.chooseRoute(durationHint, audioSize)
 	finalVadMeta := &VadMeta{Enabled: false, Reason: "direct_route"}
 
@@ -244,41 +252,20 @@ func (s *Service) TranscribeStream(ctx context.Context, audio io.Reader, filenam
 	deltaCh := make(chan string, 64)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- s.provider.TranscribeStreamSSE(ctx, &TranscribeRequest{
-			Audio:    uploadReader,
-			Filename: uploadFilename,
-			Language: language,
-			Prompt:   prompt,
-			Model:    s.resolveModel(model),
-		}, deltaCh)
+		errCh <- s.provider.TranscribeStreamSSE(ctx, &TranscribeRequest{Audio: uploadReader, Filename: uploadFilename, Language: language, Prompt: prompt, Model: s.resolveModel(model)}, deltaCh)
 		close(deltaCh)
 	}()
 
 	var accumulated strings.Builder
 	for delta := range deltaCh {
 		accumulated.WriteString(delta)
-		out <- &TranscribeEvent{
-			Type:            EventPartial,
-			Text:            delta,
-			AccumulatedText: accumulated.String(),
-		}
+		out <- &TranscribeEvent{Type: EventPartial, Text: delta, AccumulatedText: accumulated.String()}
 	}
-
 	if err := <-errCh; err != nil {
 		return errs.Wrap(errs.ErrSTTUpstream, err)
 	}
-
-	out <- &TranscribeEvent{
-		Type:    EventFinal,
-		Text:    accumulated.String(),
-		VadMeta: finalVadMeta,
-	}
+	out <- &TranscribeEvent{Type: EventFinal, Text: accumulated.String(), VadMeta: finalVadMeta}
 	return nil
-}
-
-func toWAVAudio(r io.Reader) ([]byte, error) {
-	// ffmpeg Decode already normalized to 16kHz mono s16le.
-	return codec.PCMReaderToWAV(r, 16000, 1, 16)
 }
 
 func (s *Service) vadProcess(pcm io.ReadCloser) (io.Reader, *VadMeta, error) {
@@ -294,72 +281,37 @@ func (s *Service) vadProcess(pcm io.ReadCloser) (io.Reader, *VadMeta, error) {
 		}
 		results = append(results, *fr)
 	}
-
 	if len(allSamples) == 0 {
 		return nil, nil, fmt.Errorf("no audio samples decoded")
 	}
 
-	// Check audio duration against max
 	audioSec := float64(len(allSamples)) / 16000.0
 	if audioSec > s.cfg.VAD.MaxAudioSec {
-		return codec.SamplesToReader(allSamples), &VadMeta{
-			Enabled:       true,
-			Reason:        "audio_too_long_skip_vad",
-			AudioMsBefore: int64(audioSec * 1000),
-			AudioMsAfter:  int64(audioSec * 1000),
-		}, nil
+		return codec.SamplesToReader(allSamples), &VadMeta{Enabled: true, Reason: "audio_too_long_skip_vad", AudioMsBefore: int64(audioSec * 1000), AudioMsAfter: int64(audioSec * 1000)}, nil
 	}
 
 	segments := s.merger.Merge(results, s.detector.HopSize(), 16000)
 	if len(segments) == 0 {
-		return codec.SamplesToReader(allSamples), &VadMeta{
-			Enabled:       true,
-			Fallback:      true,
-			Reason:        "no_voice_detected",
-			AudioMsBefore: int64(audioSec * 1000),
-			AudioMsAfter:  int64(audioSec * 1000),
-		}, nil
+		return codec.SamplesToReader(allSamples), &VadMeta{Enabled: true, Fallback: true, Reason: "no_voice_detected", AudioMsBefore: int64(audioSec * 1000), AudioMsAfter: int64(audioSec * 1000)}, nil
 	}
 
 	trimmed := vad.ExtractSegments(allSamples, segments)
 	if len(trimmed) == 0 {
-		return codec.SamplesToReader(allSamples), &VadMeta{
-			Enabled:       true,
-			Fallback:      true,
-			Reason:        "empty_trimmed_audio",
-			AudioMsBefore: int64(audioSec * 1000),
-			AudioMsAfter:  int64(audioSec * 1000),
-		}, nil
+		return codec.SamplesToReader(allSamples), &VadMeta{Enabled: true, Fallback: true, Reason: "empty_trimmed_audio", AudioMsBefore: int64(audioSec * 1000), AudioMsAfter: int64(audioSec * 1000)}, nil
 	}
 
 	audioMsBefore := int64(len(allSamples)) * 1000 / 16000
 	audioMsAfter := int64(len(trimmed)) * 1000 / 16000
 	trimRatio := float64(audioMsAfter) / float64(audioMsBefore)
-
 	if trimRatio < s.cfg.VAD.MinTrimRatio {
-		return codec.SamplesToReader(allSamples), &VadMeta{
-			Enabled:       true,
-			Fallback:      true,
-			Reason:        "trim_ratio_too_small_fallback",
-			AudioMsBefore: audioMsBefore,
-			AudioMsAfter:  audioMsBefore,
-			TrimRatio:     trimRatio,
-		}, nil
+		return codec.SamplesToReader(allSamples), &VadMeta{Enabled: true, Fallback: true, Reason: "trim_ratio_too_small_fallback", AudioMsBefore: audioMsBefore, AudioMsAfter: audioMsBefore, TrimRatio: trimRatio}, nil
 	}
 
-	return codec.SamplesToReader(trimmed), &VadMeta{
-		Enabled:       true,
-		Reason:        "ok",
-		AudioMsBefore: audioMsBefore,
-		AudioMsAfter:  audioMsAfter,
-		TrimRatio:     trimRatio,
-		SegmentsCount: int32(len(segments)),
-	}, nil
+	return codec.SamplesToReader(trimmed), &VadMeta{Enabled: true, Reason: "ok", AudioMsBefore: audioMsBefore, AudioMsAfter: audioMsAfter, TrimRatio: trimRatio, SegmentsCount: int32(len(segments))}, nil
 }
 
 func (s *Service) vadStreamProcess(pcm io.ReadCloser) io.Reader {
 	pr, pw := io.Pipe()
-
 	go func() {
 		defer pw.Close()
 		frames := codec.ReadFrames(pcm, s.detector.HopSize())
@@ -373,6 +325,19 @@ func (s *Service) vadStreamProcess(pcm io.ReadCloser) io.Reader {
 		inSpeech := false
 		speechFrameCount := 0
 		silenceFrameCount := 0
+		frameBuf := make([]byte, hopSize*2)
+		writeFrame := func(frame []int16) error {
+			need := len(frame) * 2
+			if cap(frameBuf) < need {
+				frameBuf = make([]byte, need)
+			}
+			b := frameBuf[:need]
+			for i, sample := range frame {
+				binary.LittleEndian.PutUint16(b[i*2:], uint16(sample))
+			}
+			_, err := pw.Write(b)
+			return err
+		}
 
 		for frame := range frames {
 			fr, err := s.detector.Process(frame)
@@ -380,11 +345,10 @@ func (s *Service) vadStreamProcess(pcm io.ReadCloser) io.Reader {
 				pw.CloseWithError(err)
 				return
 			}
-
 			if fr.IsVoice {
 				if !inSpeech {
 					for _, pf := range padBuf {
-						if err := writeFrameBytes(pw, pf); err != nil {
+						if err := writeFrame(pf); err != nil {
 							pw.CloseWithError(err)
 							return
 						}
@@ -395,7 +359,7 @@ func (s *Service) vadStreamProcess(pcm io.ReadCloser) io.Reader {
 				}
 				speechFrameCount++
 				silenceFrameCount = 0
-				if err := writeFrameBytes(pw, frame); err != nil {
+				if err := writeFrame(frame); err != nil {
 					pw.CloseWithError(err)
 					return
 				}
@@ -405,7 +369,7 @@ func (s *Service) vadStreamProcess(pcm io.ReadCloser) io.Reader {
 			if inSpeech {
 				silenceFrameCount++
 				if silenceFrameCount <= maxGapFrames {
-					if err := writeFrameBytes(pw, frame); err != nil {
+					if err := writeFrame(frame); err != nil {
 						pw.CloseWithError(err)
 						return
 					}
@@ -428,15 +392,5 @@ func (s *Service) vadStreamProcess(pcm io.ReadCloser) io.Reader {
 			}
 		}
 	}()
-
 	return pr
-}
-
-func writeFrameBytes(w io.Writer, frame []int16) error {
-	buf := make([]byte, len(frame)*2)
-	for i, s := range frame {
-		binary.LittleEndian.PutUint16(buf[i*2:], uint16(s))
-	}
-	_, err := w.Write(buf)
-	return err
 }

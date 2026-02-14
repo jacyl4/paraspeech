@@ -9,7 +9,7 @@ func TestCode_String(t *testing.T) {
 	}{
 		{OK, "OK"},
 		{ErrSTTDecodeFailed, "STT_DECODE_FAILED"},
-		{ErrVaultMissing, "VAULT_MISSING"},
+		{ErrTTSUpstream, "TTS_UPSTREAM"},
 		{Code(9999), "UNKNOWN"},
 	}
 	for _, tt := range tests {
@@ -27,7 +27,7 @@ func TestError_Format(t *testing.T) {
 }
 
 func TestWrap_Unwrap(t *testing.T) {
-	cause := New(ErrInternal, "io error")
+	cause := New(ErrSTTUpstream, "io error")
 	wrapped := Wrap(ErrSTTDecodeFailed, cause)
 	if wrapped.Unwrap() != cause {
 		t.Error("Unwrap() should return cause")

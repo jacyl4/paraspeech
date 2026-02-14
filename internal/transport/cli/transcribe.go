@@ -11,8 +11,6 @@ import (
 	"paraspeech/internal/config"
 
 	"github.com/spf13/cobra"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 func newTranscribeCmd() *cobra.Command {
@@ -34,7 +32,6 @@ func newTranscribeCmd() *cobra.Command {
 			return runTranscribe(args[0], language, model, vadDebug)
 		},
 	}
-
 	cmd.Flags().StringVar(&language, "language", "", "language hint (e.g., zh, en)")
 	cmd.Flags().StringVar(&model, "model", "", "STT model override")
 	cmd.Flags().BoolVar(&vadDebug, "vad-debug", false, "include VAD metadata in output")
@@ -47,40 +44,25 @@ func runTranscribe(file, language, model string, vadDebug bool) error {
 	if err != nil {
 		return err
 	}
-
 	audio, err := os.ReadFile(file)
 	if err != nil {
 		return fmt.Errorf("read file: %w", err)
 	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.STT.Timeout)
 	defer cancel()
 
-	conn, err := grpc.NewClient(cfg.Server.GRPCAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(4*1024*1024),
-			grpc.MaxCallSendMsgSize(26*1024*1024),
-		),
-	)
+	conn, err := dialServe(cfg)
 	if err != nil {
-		return fmt.Errorf("connect to serve: %w (is 'paraspeech serve' running?)", err)
+		return err
 	}
 	defer conn.Close()
 
 	start := time.Now()
-	resp, err := pb.NewSTTServiceClient(conn).Transcribe(ctx, &pb.TranscribeRequest{
-		Audio:    audio,
-		Filename: file,
-		Language: language,
-		Model:    model,
-		VadDebug: vadDebug,
-	})
+	resp, err := pb.NewSTTServiceClient(conn).Transcribe(ctx, &pb.TranscribeRequest{Audio: audio, Filename: file, Language: language, Model: model, VadDebug: vadDebug})
 	if err != nil {
 		return fmt.Errorf("transcribe failed: %w", err)
 	}
 	elapsed := time.Since(start)
-
 	return printTranscribeResult(os.Stdout, resp, vadDebug, elapsed, format)
 }
 
@@ -89,25 +71,23 @@ func runTranscribeStream(file, language, model string, vadDebug bool) error {
 	if err != nil {
 		return err
 	}
-
 	audio, err := os.Open(file)
 	if err != nil {
 		return fmt.Errorf("open file: %w", err)
 	}
 	defer audio.Close()
 
+	stat, _ := audio.Stat()
+	durationHint := 0.0
+	if stat != nil && stat.Size() >= cfg.STT.DirectMaxBytes {
+		durationHint = cfg.STT.VAD.MaxAudioSec
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.STT.Timeout)
 	defer cancel()
-
-	conn, err := grpc.NewClient(cfg.Server.GRPCAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(4*1024*1024),
-			grpc.MaxCallSendMsgSize(26*1024*1024),
-		),
-	)
+	conn, err := dialServe(cfg)
 	if err != nil {
-		return fmt.Errorf("connect to serve: %w (is 'paraspeech serve' running?)", err)
+		return err
 	}
 	defer conn.Close()
 
@@ -125,7 +105,7 @@ func runTranscribeStream(file, language, model string, vadDebug bool) error {
 			if n > 0 {
 				frame := &pb.AudioFrame{Data: append([]byte(nil), buf[:n]...)}
 				if first {
-					frame.DurationHint = 0
+					frame.DurationHint = durationHint
 					frame.Language = language
 					frame.Model = model
 					frame.VadDebug = vadDebug
@@ -168,8 +148,6 @@ func runTranscribeStream(file, language, model string, vadDebug bool) error {
 			fmt.Print(e.Partial.GetText())
 		case *pb.TranscribeEvent_Final:
 			fmt.Println()
-		case *pb.TranscribeEvent_Error:
-			return fmt.Errorf("transcribe error %d: %s", e.Error.GetCode(), e.Error.GetMessage())
 		}
 	}
 }

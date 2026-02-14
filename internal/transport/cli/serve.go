@@ -14,11 +14,10 @@ import (
 	"paraspeech/internal/observe"
 	"paraspeech/internal/provider/openai"
 	"paraspeech/internal/stt"
-	"paraspeech/internal/tts"
 	grpctransport "paraspeech/internal/transport/grpc"
+	"paraspeech/internal/tts"
 	"paraspeech/internal/vad"
 	"paraspeech/internal/vault"
-	"paraspeech/internal/voice"
 )
 
 func newServeCmd() *cobra.Command {
@@ -43,50 +42,61 @@ func runServe() error {
 	observe.SetupLogger(cfg.Log.Level, cfg.Log.Format)
 	slog.Info("starting paraspeech", "grpc_addr", cfg.Server.GRPCAddr)
 
-	// Vault
-	v, err := vault.New(vault.Config{
-		SecretsFile: cfg.Vault.SecretsFile,
-	})
+	v, err := vault.New(vault.Config{SecretsFile: cfg.Vault.SecretsFile})
 	if err != nil {
 		return fmt.Errorf("vault init: %w", err)
 	}
 	go v.WatchReload(syscall.SIGHUP)
 
-	// VAD
 	var detector vad.Detector
-	if cfg.STT.VAD.Mode != "off" {
-		detector, err = vad.NewTenVad(cfg.STT.VAD.HopSize, cfg.STT.VAD.Threshold)
-		if err != nil {
-			slog.Warn("TEN VAD init failed, running with vad=off", "error", err)
+	var sttSvc *stt.Service
+	var sttProvider *openai.STT
+	if cfg.STT.Enabled {
+		if cfg.STT.VAD.Mode != "off" {
+			detector, err = vad.NewTenVad(cfg.STT.VAD.HopSize, cfg.STT.VAD.Threshold)
+			if err != nil {
+				slog.Warn("TEN VAD init failed, running with vad=off", "error", err)
+			}
 		}
-	}
-	merger := vad.NewSegmentMerger(cfg.STT.VAD)
-
-	// Providers
-	adapter := &voice.OpenAIAdapter{}
-	sttProvider := openai.NewSTT(v, cfg.STT.Upstream)
-	ttsProvider := openai.NewTTS(v, adapter, cfg.TTS.Upstream)
-
-	// Prewarm
-	if cfg.STT.Upstream.PrewarmOnStart {
-		ctx := context.Background()
-		if err := openai.NewSharedClient(v, cfg.STT.Upstream).Prewarm(ctx, cfg.STT.Upstream.Endpoint, cfg.STT.Upstream.PrewarmTimeout); err != nil {
-			if !cfg.STT.Upstream.PrewarmFailOpen {
+		merger := vad.NewSegmentMerger(cfg.STT.VAD)
+		sttProvider = openai.NewSTT(v, cfg.STT.Upstream)
+		if cfg.STT.Upstream.PrewarmOnStart {
+			ctx := context.Background()
+			if err := sttProvider.Prewarm(ctx, cfg.STT.Upstream.PrewarmTimeout); err != nil && !cfg.STT.Upstream.PrewarmFailOpen {
 				return fmt.Errorf("STT prewarm: %w", err)
 			}
 		}
+		sttSvc = stt.NewService(detector, merger, sttProvider, cfg.STT)
+	} else {
+		slog.Info("STT channel disabled by config")
 	}
 
-	// Services
-	sttSvc := stt.NewService(detector, merger, sttProvider, cfg.STT)
-	ttsSvc := tts.NewService(ttsProvider, adapter, cfg.TTS)
+	var ttsSvc *tts.Service
+	var ttsProvider *openai.TTS
+	if cfg.TTS.Enabled {
+		ttsProvider = openai.NewTTS(v, cfg.TTS.Upstream)
+		if cfg.TTS.Upstream.PrewarmOnStart {
+			ctx := context.Background()
+			if err := ttsProvider.Prewarm(ctx, cfg.TTS.Upstream.PrewarmTimeout); err != nil && !cfg.TTS.Upstream.PrewarmFailOpen {
+				return fmt.Errorf("TTS prewarm: %w", err)
+			}
+		}
+		ttsSvc = tts.NewService(ttsProvider, cfg.TTS)
+	} else {
+		slog.Info("TTS channel disabled by config")
+	}
 
-	// gRPC server
-	srv := grpctransport.NewServer(*cfg, sttSvc, ttsSvc, adapter)
+	srv := grpctransport.NewServer(*cfg, sttSvc, ttsSvc, v)
 
-	// Graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if sttProvider != nil && cfg.STT.Upstream.KeepaliveInterval > 0 {
+		go sttProvider.Keepalive(ctx, cfg.STT.Upstream.KeepaliveInterval)
+	}
+	if ttsProvider != nil && cfg.TTS.Upstream.KeepaliveInterval > 0 {
+		go ttsProvider.Keepalive(ctx, cfg.TTS.Upstream.KeepaliveInterval)
+	}
 
 	go func() {
 		if err := srv.Serve(); err != nil {
@@ -98,9 +108,8 @@ func runServe() error {
 	<-ctx.Done()
 	slog.Info("shutdown signal received")
 	srv.GracefulStop(cfg.Server.ShutdownTimeout)
-
 	if detector != nil {
-		detector.Close()
+		_ = detector.Close()
 	}
 	v.Close()
 	slog.Info("paraspeech stopped")

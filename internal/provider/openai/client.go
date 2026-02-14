@@ -17,26 +17,24 @@ type SharedClient struct {
 }
 
 func NewSharedClient(v vault.Vault, cfg config.Upstream) *SharedClient {
+	headerTimeout := cfg.ReadTimeout
+	if headerTimeout <= 0 {
+		headerTimeout = 30 * time.Second
+	}
 	transport := &http.Transport{
 		MaxIdleConns:          cfg.MaxConnections,
 		MaxIdleConnsPerHost:   cfg.MaxKeepalive,
 		IdleConnTimeout:       90 * time.Second,
 		ForceAttemptHTTP2:     true,
 		TLSHandshakeTimeout:   5 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
+		ResponseHeaderTimeout: headerTimeout,
 		ExpectContinueTimeout: 0,
 		DisableCompression:    true,
 		WriteBufferSize:       64 * 1024,
 		ReadBufferSize:        16 * 1024,
-		DialContext: (&net.Dialer{
-			Timeout:   cfg.ConnectTimeout,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext:           (&net.Dialer{Timeout: cfg.ConnectTimeout, KeepAlive: 30 * time.Second}).DialContext,
 	}
-	return &SharedClient{
-		client: &http.Client{Transport: transport},
-		vault:  v,
-	}
+	return &SharedClient{client: &http.Client{Transport: transport}, vault: v}
 }
 
 func (c *SharedClient) Prewarm(ctx context.Context, endpoint string, timeout time.Duration) error {
@@ -54,6 +52,22 @@ func (c *SharedClient) Prewarm(ctx context.Context, endpoint string, timeout tim
 	resp.Body.Close()
 	slog.Debug("prewarm ok", "endpoint", endpoint)
 	return nil
+}
+
+func (c *SharedClient) Keepalive(ctx context.Context, endpoint string, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = c.Prewarm(ctx, endpoint, 3*time.Second)
+		}
+	}
 }
 
 func (c *SharedClient) do(req *http.Request, keyPurpose vault.KeyPurpose) (*http.Response, error) {

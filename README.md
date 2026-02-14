@@ -38,7 +38,7 @@
 |----|------|----------|------|
 | Transport | `grpc` / `cli` | 协议入口、参数接收、输出格式化 | 不做业务决策，不直接调上游 |
 | Service | `stt` / `tts` | 编排完整业务链路 | 仅依赖 domain/infra/provider 抽象 |
-| Domain | `codec` / `vad` / `voice` / `queue` | 语音处理与策略算法 | 与具体上游 API 解耦 |
+| Domain | `codec` / `vad` / `voice` | 语音处理与策略算法 | 与具体上游 API 解耦 |
 | Provider | `provider/openai` | 封装上游 HTTP 协议细节 | 不关心调用来源（CLI/gRPC） |
 | Infra | `config` / `vault` / `observe` / `errs` | 配置、密钥、日志、错误模型 | 全局可复用，避免业务入侵 |
 
@@ -54,24 +54,13 @@
 4. OpenAI 返回 SSE：`transcript.text.delta` / `transcript.text.done`。
 5. Stream RPC 逐条下发 partial，Unary 内部聚合后一次性返回 text（可选 VAD meta）。
 
-设计要点：
-
-- OpenAI transcriptions 官方支持 `webm`，不含 `ogg`，因此统一上传 `webm/opus`。
-- `stream=true` 同时用于 Unary 和 Stream，缩短首字延迟。
-- VAD 失败时有回退，不阻断主链路。
-
 ### 业务链路（TTS）
 
 1. 客户端调用 `TTSService.Synthesize` 或 `paraspeech synthesize`。
 2. 文本先做 sanitize（去 markdown/代码块/URL 噪声）。
 3. 按时长和语义边界分段，避免句中硬切。
-4. 逐段调用 OpenAI TTS 并聚合输出。
+4. 逐段调用 OpenAI TTS 并聚合输出；`Synthesize` 在未设置 `max_sec` 时默认尽量单段返回，便于直接落盘为单文件。
 5. 返回段信息与音频结果（CLI 侧默认精简输出）。
-
-设计要点：
-
-- 清洗与分段是稳定性的关键，不把脏输入直接交给上游。
-- 多段聚合保证长文本场景可控。
 
 ### 运行边界与安全模型
 
@@ -200,6 +189,34 @@ sudo systemctl daemon-reload
 sudo systemctl restart paraspeech
 ```
 
+### 5.2 （可选）现场编译 `libten_vad.so`
+
+如果现场环境没有现成的动态库（包管理器/Python wheel 都不可用），可以临时源码编译：
+
+```bash
+# 1) 安装构建工具
+sudo apt-get update
+sudo apt-get install -y git build-essential cmake
+
+# 2) 拉取 TEN VAD 源码
+git clone --depth=1 https://github.com/TEN-framework/ten-vad.git /tmp/ten-vad
+
+# 3) 编译动态库
+cmake -S /tmp/ten-vad -B /tmp/ten-vad/build -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/ten-vad/build -j"$(nproc)"
+
+# 4) 安装到默认搜索路径（或改用 TEN_VAD_LIB 指向产物绝对路径）
+sudo install -m 755 /tmp/ten-vad/build/libten_vad.so /usr/local/lib/libten_vad.so
+sudo ldconfig
+sudo systemctl restart paraspeech
+```
+
+如果编译产物不在 `/tmp/ten-vad/build/libten_vad.so`，可先定位后再安装：
+
+```bash
+find /tmp/ten-vad -name 'libten_vad.so' -type f
+```
+
 ### 6. 验证服务
 
 ```bash
@@ -231,12 +248,14 @@ sudo systemctl reload paraspeech         # SIGHUP 热重载
 | `server.grpc_addr` | `127.0.0.1:9800` | gRPC 监听地址（仅本地） |
 | `server.shutdown_timeout` | `10s` | 优雅停机超时 |
 | `stt.default_model` | `gpt-4o-mini-transcribe` | STT 默认模型 |
+| `stt.enabled` | `true` | 是否注册 STT gRPC 服务（false 时该服务不注册） |
 | `stt.direct_max_bytes` | `512000` | 无 `duration_hint` 时直传/VAD 分流阈值 |
 | `stt.vad.mode` | `on` | VAD 模式：on / off / debug |
 | `stt.vad.hop_size` | `256` | TEN VAD 帧长（256=16ms @ 16kHz） |
 | `stt.vad.threshold` | `0.5` | VAD 检测阈值 [0, 1] |
 | `stt.vad.max_audio_sec` | `30` | 路径分界阈值（>=30s 走 VAD 路径） |
 | `tts.default_model` | `gpt-4o-mini-tts` | TTS 默认模型 |
+| `tts.enabled` | `true` | 是否注册 TTS gRPC 服务（false 时该服务不注册） |
 | `tts.default_voice` | `nova` | 默认音色 |
 | `tts.default_speed` | `1.22` | 默认语速 |
 | `tts.max_sec` | `25.0` | 单段最大时长（超出自动分段） |
@@ -266,12 +285,6 @@ sudo systemctl reload paraspeech         # SIGHUP 热重载
 - 日志脱敏：字段名包含 `key/secret/token/sk-` 自动替换为 `[REDACTED]`
 - Trace ID：每次 STT/TTS 请求生成 `trace_id`，写入 gRPC 响应元信息（`meta.trace_id`）
 - 健康检查：`HealthService.Check` 和 `paraspeech health` 可用于存活与基本配置检查
-
-### 预留但未启用（当前版本）
-
-- `server.metrics_addr` 仅为预留配置
-- Prometheus `/metrics` 端点尚未实现
-- gRPC 全局拦截器（统一请求日志/指标采集）尚未接入
 
 ### 运维建议（当前版本）
 
@@ -329,7 +342,7 @@ service TTSService {
 | `text` | string | 待合成文本 |
 | `voice_profile` | VoiceProfile | 音色/语速/情感/风格 |
 | `model` | string | 模型覆盖 |
-| `format` | string | 输出格式：opus, mp3, pcm |
+| `format` | string | 输出格式：`opus`（推荐，OGG/Opus）、`mp3`、`pcm`；兼容 `ogg`/`audio/ogg`/`audio/opus` 等别名并归一化为 `opus` |
 | `max_sec` | double | 单段最大时长覆盖 |
 
 `Preview` RPC 为 dry-run 模式，仅返回分段预览不实际合成。
@@ -392,6 +405,9 @@ paraspeech synthesize \
   --style conversational \
   --audio-format opus
 
+# OGG/Opus 等价写法（服务端会归一化为 opus）
+paraspeech synthesize --text "你好世界" --audio-format ogg
+
 # 预览分段（不实际合成）
 paraspeech synthesize --text "很长的文本..." --dry-run
 ```
@@ -445,18 +461,11 @@ grpcurl -plaintext \
 | 码 | 名称 | 说明 |
 |----|------|------|
 | 0 | OK | 成功 |
-| 100 | INVALID_REQUEST | 请求参数无效 |
 | 101 | EMPTY_INPUT | 空输入 |
-| 102 | PAYLOAD_TOO_LARGE | 超过大小限制 |
-| 103 | TIMEOUT | 处理超时 |
-| 104 | RATE_LIMITED | 限流 |
+| 199 | INTERNAL | 内部错误 |
 | 200 | STT_DECODE_FAILED | ffmpeg 解码失败 |
-| 201 | STT_VAD_FAILED | VAD 处理失败 |
 | 210 | STT_UPSTREAM | 上游 STT 错误 |
-| 300 | TTS_SANITIZE_FAILED | 文本清洗失败 |
-| 301 | TTS_SPLIT_FAILED | 分段失败 |
 | 310 | TTS_UPSTREAM | 上游 TTS 错误 |
-| 400 | VAULT_MISSING | 密钥缺失 |
 
 ---
 

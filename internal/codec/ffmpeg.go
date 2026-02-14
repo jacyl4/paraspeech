@@ -1,11 +1,13 @@
 package codec
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"os/exec"
+	"time"
 )
 
 type ffmpegReader struct {
@@ -19,7 +21,17 @@ func (r *ffmpegReader) Read(p []byte) (int, error) {
 
 func (r *ffmpegReader) Close() error {
 	_ = r.reader.Close()
-	return r.cmd.Wait()
+	done := make(chan error, 1)
+	go func() { done <- r.cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(5 * time.Second):
+		if r.cmd.Process != nil {
+			_ = r.cmd.Process.Kill()
+		}
+		return fmt.Errorf("ffmpeg wait timeout, process killed")
+	}
 }
 
 // Decode converts any audio format to 16kHz mono PCM int16 via ffmpeg pipe.
@@ -133,19 +145,5 @@ func SamplesToReader(samples []int16) io.Reader {
 	for i, s := range samples {
 		binary.LittleEndian.PutUint16(buf[i*2:], uint16(s))
 	}
-	return &byteReader{data: buf}
-}
-
-type byteReader struct {
-	data []byte
-	pos  int
-}
-
-func (r *byteReader) Read(p []byte) (int, error) {
-	if r.pos >= len(r.data) {
-		return 0, io.EOF
-	}
-	n := copy(p, r.data[r.pos:])
-	r.pos += n
-	return n, nil
+	return bytes.NewReader(buf)
 }

@@ -2,6 +2,7 @@ package openai
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"strings"
@@ -14,12 +15,18 @@ type SSEEvent struct {
 	Error string
 }
 
-func ParseSSEStream(reader io.Reader, out chan<- SSEEvent) error {
+func ParseSSEStream(ctx context.Context, reader io.Reader, out chan<- SSEEvent) error {
 	scanner := bufio.NewScanner(reader)
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
 
 	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		line := strings.TrimSpace(scanner.Text())
 		if !strings.HasPrefix(line, "data:") {
 			continue
@@ -35,7 +42,11 @@ func ParseSSEStream(reader io.Reader, out chan<- SSEEvent) error {
 		if err != nil {
 			continue
 		}
-		out <- event
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case out <- event:
+		}
 	}
 	return scanner.Err()
 }
@@ -52,10 +63,5 @@ func parseEventJSON(data string) (SSEEvent, error) {
 	if err := json.Unmarshal([]byte(data), &payload); err != nil {
 		return SSEEvent{}, err
 	}
-	return SSEEvent{
-		Type:  payload.Type,
-		Delta: payload.Delta,
-		Text:  payload.Text,
-		Error: payload.Error.Message,
-	}, nil
+	return SSEEvent{Type: payload.Type, Delta: payload.Delta, Text: payload.Text, Error: payload.Error.Message}, nil
 }

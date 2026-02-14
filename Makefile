@@ -1,7 +1,7 @@
 .PHONY: build test lint proto clean version
 
 APP := paraspeech
-VERSION := v1.0.0.0
+VERSION := v1.0.1
 PKG := paraspeech/internal/version
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE := $(shell TZ=Asia/Shanghai date '+%Y-%m-%dT%H:%M:%S%:z')

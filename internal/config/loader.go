@@ -3,21 +3,18 @@ package config
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/BurntSushi/toml"
 )
 
 func Load(paths ...string) (*Config, error) {
 	cfg := Defaults()
-
 	path := resolveConfigPath(paths...)
 	if path != "" {
 		if _, err := toml.DecodeFile(path, cfg); err != nil {
 			return nil, fmt.Errorf("load config %s: %w", path, err)
 		}
 	}
-
 	applyEnvOverrides(cfg)
 	return cfg, nil
 }
@@ -35,25 +32,7 @@ func resolveConfigPath(paths ...string) string {
 	return ""
 }
 
-// applyEnvOverrides applies PARASPEECH_{SECTION}_{KEY} env vars to config.
-// Security: keys containing "key", "secret", "token" are skipped.
 func applyEnvOverrides(cfg *Config) {
-	for _, env := range os.Environ() {
-		if !strings.HasPrefix(env, "PARASPEECH_") {
-			continue
-		}
-		parts := strings.SplitN(env, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		name := strings.ToLower(parts[0])
-		if containsSensitive(name) {
-			continue
-		}
-		_ = parts[1] // value available for future field mapping
-	}
-	// Full env override mapping is implemented during TOML field iteration.
-	// For now, specific high-priority overrides:
 	if v := os.Getenv("PARASPEECH_SERVER_GRPC_ADDR"); v != "" {
 		cfg.Server.GRPCAddr = v
 	}
@@ -65,17 +44,6 @@ func applyEnvOverrides(cfg *Config) {
 	}
 }
 
-func containsSensitive(name string) bool {
-	lower := strings.ToLower(name)
-	for _, word := range []string{"key", "secret", "token"} {
-		if strings.Contains(lower, word) {
-			return true
-		}
-	}
-	return false
-}
-
-// Validate checks config consistency.
 func Validate(cfg *Config) error {
 	if cfg.Server.GRPCAddr == "" {
 		return fmt.Errorf("server.grpc_addr is required")
@@ -88,5 +56,3 @@ func Validate(cfg *Config) error {
 	}
 	return nil
 }
-
-

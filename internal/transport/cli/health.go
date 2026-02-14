@@ -11,8 +11,6 @@ import (
 	"paraspeech/internal/config"
 
 	"github.com/spf13/cobra"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 func newHealthCmd() *cobra.Command {
@@ -30,15 +28,12 @@ func runHealth() error {
 	if err != nil {
 		return err
 	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	conn, err := grpc.NewClient(cfg.Server.GRPCAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
+	conn, err := dialServe(cfg)
 	if err != nil {
-		return fmt.Errorf("connect to serve: %w (is 'paraspeech serve' running?)", err)
+		return err
 	}
 	defer conn.Close()
 
@@ -46,27 +41,14 @@ func runHealth() error {
 	if err != nil {
 		return fmt.Errorf("health check failed: %w", err)
 	}
-
 	return printHealthResult(os.Stdout, resp, format)
 }
 
 func printHealthResult(w io.Writer, resp *pb.HealthResponse, format string) error {
 	if format == "json" {
-		_, err := fmt.Fprintf(
-			w,
-			"{\"ok\":%t,\"service\":%q,\"version\":%q}\n",
-			resp.GetOk(),
-			resp.GetService(),
-			resp.GetVersion(),
-		)
+		_, err := fmt.Fprintf(w, "{\"ok\":%t,\"service\":%q,\"version\":%q}\n", resp.GetOk(), resp.GetService(), resp.GetVersion())
 		return err
 	}
-	_, err := fmt.Fprintf(
-		w,
-		"ok: %t\nservice: %q\nversion: %q\n",
-		resp.GetOk(),
-		resp.GetService(),
-		resp.GetVersion(),
-	)
+	_, err := fmt.Fprintf(w, "ok: %t\nservice: %q\nversion: %q\n", resp.GetOk(), resp.GetService(), resp.GetVersion())
 	return err
 }
