@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"time"
+
+	pb "paraspeech/api/proto/paraspeech/v1"
+	"paraspeech/internal/config"
 
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-
-	"paraspeech/internal/config"
 )
 
 func newSynthesizeCmd() *cobra.Command {
@@ -61,86 +61,48 @@ func runSynthesize(text, voiceN, emotion, style, audioFmt string, speed float64,
 	}
 	defer conn.Close()
 
+	client := pb.NewTTSServiceClient(conn)
 	if dryRun {
-		var resp previewResp
-		err = conn.Invoke(ctx, "/paraspeech.v1.TTSService/Preview", &previewReq{
+		resp, err := client.Preview(ctx, &pb.PreviewRequest{
 			Text:   text,
 			MaxSec: cfg.TTS.MaxSec,
-		}, &resp)
+		})
 		if err != nil {
 			return fmt.Errorf("preview failed: %w", err)
 		}
-		return printPreviewResult(os.Stdout, &resp, format)
+		return printPreviewResult(os.Stdout, resp, format)
 	}
 
-	start := time.Now()
-	var resp synthesizeResp
-	err = conn.Invoke(ctx, "/paraspeech.v1.TTSService/Synthesize", &synthesizeReq{
-		Text:    text,
-		Voice:   voiceN,
-		Speed:   speed,
-		Emotion: emotion,
-		Style:   style,
-		Format:  audioFmt,
-	}, &resp)
+	resp, err := client.Synthesize(ctx, &pb.SynthesizeRequest{
+		Text: text,
+		VoiceProfile: &pb.VoiceProfile{
+			Voice:   voiceN,
+			Speed:   speed,
+			Emotion: emotion,
+			Style:   style,
+		},
+		Format: audioFmt,
+	})
 	if err != nil {
 		return fmt.Errorf("synthesize failed: %w", err)
 	}
-	_ = time.Since(start)
-
-	return printSynthesizeResult(os.Stdout, &resp, format)
+	return printSynthesizeResult(os.Stdout, resp, format)
 }
 
-// Temporary wire types
-type synthesizeReq struct {
-	Text    string  `protobuf:"bytes,1,opt,name=text"`
-	Voice   string  `protobuf:"bytes,2,opt,name=voice"`
-	Speed   float64 `protobuf:"fixed64,3,opt,name=speed"`
-	Emotion string  `protobuf:"bytes,4,opt,name=emotion"`
-	Style   string  `protobuf:"bytes,5,opt,name=style"`
-	Format  string  `protobuf:"bytes,6,opt,name=format"`
-}
-
-type synthesizeResp struct {
-	Count int32 `protobuf:"varint,1,opt,name=count"`
-}
-
-type previewReq struct {
-	Text   string  `protobuf:"bytes,1,opt,name=text"`
-	MaxSec float64 `protobuf:"fixed64,2,opt,name=max_sec"`
-}
-
-type previewResp struct {
-	Count int32 `protobuf:"varint,1,opt,name=count"`
-}
-
-func (r *synthesizeReq) ProtoReflect()  {}
-func (r *synthesizeReq) Reset()         {}
-func (r *synthesizeReq) String() string { return "" }
-func (r *synthesizeResp) ProtoReflect()  {}
-func (r *synthesizeResp) Reset()         {}
-func (r *synthesizeResp) String() string { return "" }
-func (r *previewReq) ProtoReflect()      {}
-func (r *previewReq) Reset()             {}
-func (r *previewReq) String() string     { return "" }
-func (r *previewResp) ProtoReflect()     {}
-func (r *previewResp) Reset()            {}
-func (r *previewResp) String() string    { return "" }
-
-func printSynthesizeResult(w io.Writer, resp *synthesizeResp, format string) error {
+func printSynthesizeResult(w io.Writer, resp *pb.SynthesizeResponse, format string) error {
 	if format == "json" {
-		_, err := fmt.Fprintf(w, "{\"count\":%d}\n", resp.Count)
+		_, err := fmt.Fprintf(w, "{\"count\":%d}\n", resp.GetCount())
 		return err
 	}
-	_, err := fmt.Fprintf(w, "count: %d\n", resp.Count)
+	_, err := fmt.Fprintf(w, "count: %d\n", resp.GetCount())
 	return err
 }
 
-func printPreviewResult(w io.Writer, resp *previewResp, format string) error {
+func printPreviewResult(w io.Writer, resp *pb.PreviewResponse, format string) error {
 	if format == "json" {
-		_, err := fmt.Fprintf(w, "{\"count\":%d}\n", resp.Count)
+		_, err := fmt.Fprintf(w, "{\"count\":%d}\n", resp.GetCount())
 		return err
 	}
-	_, err := fmt.Fprintf(w, "count: %d\n", resp.Count)
+	_, err := fmt.Fprintf(w, "count: %d\n", resp.GetCount())
 	return err
 }

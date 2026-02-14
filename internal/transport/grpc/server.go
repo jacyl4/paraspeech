@@ -16,6 +16,7 @@ import (
 
 type Server struct {
 	cfg     config.Server
+	appCfg  config.Config
 	grpc    *grpc.Server
 	sttSvc  *stt.Service
 	ttsSvc  *tts.Service
@@ -23,9 +24,10 @@ type Server struct {
 	wg      sync.WaitGroup
 }
 
-func NewServer(cfg config.Server, sttSvc *stt.Service, ttsSvc *tts.Service, adapter voice.ProviderAdapter) *Server {
+func NewServer(cfg config.Config, sttSvc *stt.Service, ttsSvc *tts.Service, adapter voice.ProviderAdapter) *Server {
 	s := &Server{
-		cfg:     cfg,
+		cfg:     cfg.Server,
+		appCfg:  cfg,
 		sttSvc:  sttSvc,
 		ttsSvc:  ttsSvc,
 		adapter: adapter,
@@ -33,6 +35,7 @@ func NewServer(cfg config.Server, sttSvc *stt.Service, ttsSvc *tts.Service, adap
 	s.grpc = grpc.NewServer()
 	registerSTTHandler(s.grpc, sttSvc, &s.wg)
 	registerTTSHandler(s.grpc, ttsSvc, adapter, &s.wg)
+	registerHealthHandler(s.grpc, cfg)
 	return s
 }
 

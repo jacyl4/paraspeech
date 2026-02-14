@@ -18,8 +18,7 @@ type Server struct {
 }
 
 type Vault struct {
-	SecretsFile      string `toml:"secrets_file"`
-	EnforceIsolation bool   `toml:"enforce_isolation"`
+	SecretsFile string `toml:"secrets_file"`
 }
 
 type Log struct {
@@ -103,8 +102,7 @@ func Defaults() *Config {
 			ShutdownTimeout: 10 * time.Second,
 		},
 		Vault: Vault{
-			SecretsFile:      "/etc/paraspeech/secrets.env",
-			EnforceIsolation: true,
+			SecretsFile: "/etc/paraspeech/secrets.env",
 		},
 		Log: Log{
 			Level:  "info",

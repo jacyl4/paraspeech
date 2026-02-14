@@ -26,8 +26,7 @@ type Vault interface {
 }
 
 type Config struct {
-	SecretsFile      string
-	EnforceIsolation bool
+	SecretsFile string
 }
 
 type fileVault struct {
@@ -127,11 +126,6 @@ func loadAndValidate(cfg Config) (map[KeyPurpose][]byte, error) {
 	}
 	if len(keys[KeyTTS]) == 0 {
 		return nil, fmt.Errorf("PARASPEECH_TTS_KEY not found in %s", cfg.SecretsFile)
-	}
-
-	if cfg.EnforceIsolation && bytes.Equal(keys[KeySTT], keys[KeyTTS]) {
-		memzero(keys)
-		return nil, fmt.Errorf("STT and TTS keys must be different (isolation enforced)")
 	}
 
 	for _, k := range keys {

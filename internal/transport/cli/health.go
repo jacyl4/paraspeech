@@ -7,11 +7,12 @@ import (
 	"os"
 	"time"
 
+	pb "paraspeech/api/proto/paraspeech/v1"
+	"paraspeech/internal/config"
+
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-
-	"paraspeech/internal/config"
 )
 
 func newHealthCmd() *cobra.Command {
@@ -41,36 +42,31 @@ func runHealth() error {
 	}
 	defer conn.Close()
 
-	var resp healthResp
-	err = conn.Invoke(ctx, "/paraspeech.v1.HealthService/Check", &healthReq{}, &resp)
+	resp, err := pb.NewHealthServiceClient(conn).Check(ctx, &pb.HealthRequest{})
 	if err != nil {
 		return fmt.Errorf("health check failed: %w", err)
 	}
 
-	return printHealthResult(os.Stdout, &resp, format)
+	return printHealthResult(os.Stdout, resp, format)
 }
 
-type healthReq struct{}
-type healthResp struct {
-	Ok      bool   `protobuf:"varint,1,opt,name=ok"`
-	Service string `protobuf:"bytes,2,opt,name=service"`
-	Version string `protobuf:"bytes,3,opt,name=version"`
-}
-
-func (r *healthReq) ProtoReflect()   {}
-func (r *healthReq) Reset()          {}
-func (r *healthReq) String() string  { return "" }
-func (r *healthResp) ProtoReflect()  {}
-func (r *healthResp) Reset()         {}
-func (r *healthResp) String() string { return "" }
-
-func printHealthResult(w io.Writer, resp *healthResp, format string) error {
+func printHealthResult(w io.Writer, resp *pb.HealthResponse, format string) error {
 	if format == "json" {
-		_, err := fmt.Fprintf(w, "{\"ok\":%t,\"service\":%q,\"version\":%q}\n",
-			resp.Ok, resp.Service, resp.Version)
+		_, err := fmt.Fprintf(
+			w,
+			"{\"ok\":%t,\"service\":%q,\"version\":%q}\n",
+			resp.GetOk(),
+			resp.GetService(),
+			resp.GetVersion(),
+		)
 		return err
 	}
-	_, err := fmt.Fprintf(w, "ok: %t\nservice: %q\nversion: %q\n",
-		resp.Ok, resp.Service, resp.Version)
+	_, err := fmt.Fprintf(
+		w,
+		"ok: %t\nservice: %q\nversion: %q\n",
+		resp.GetOk(),
+		resp.GetService(),
+		resp.GetVersion(),
+	)
 	return err
 }

@@ -7,11 +7,12 @@ import (
 	"os"
 	"time"
 
+	pb "paraspeech/api/proto/paraspeech/v1"
+	"paraspeech/internal/config"
+
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-
-	"paraspeech/internal/config"
 )
 
 func newTranscribeCmd() *cobra.Command {
@@ -58,52 +59,27 @@ func runTranscribe(file, language, model string, vadDebug bool) error {
 	}
 	defer conn.Close()
 
-	// Until proto-generated client is available, use raw gRPC invocation.
-	// For now, directly call the unary RPC method.
-	var resp transcribeResp
 	start := time.Now()
-	err = conn.Invoke(ctx, "/paraspeech.v1.STTService/Transcribe", &transcribeReq{
+	resp, err := pb.NewSTTServiceClient(conn).Transcribe(ctx, &pb.TranscribeRequest{
 		Audio:    audio,
 		Filename: file,
 		Language: language,
 		Model:    model,
 		VadDebug: vadDebug,
-	}, &resp)
+	})
 	if err != nil {
 		return fmt.Errorf("transcribe failed: %w", err)
 	}
 	elapsed := time.Since(start)
 
-	return printTranscribeResult(os.Stdout, &resp, vadDebug, elapsed, format)
+	return printTranscribeResult(os.Stdout, resp, vadDebug, elapsed, format)
 }
 
-// Temporary wire types until proto generation is set up.
-type transcribeReq struct {
-	Audio    []byte `protobuf:"bytes,1,opt,name=audio"`
-	Filename string `protobuf:"bytes,2,opt,name=filename"`
-	Language string `protobuf:"bytes,3,opt,name=language"`
-	Model    string `protobuf:"bytes,4,opt,name=model"`
-	VadDebug bool   `protobuf:"varint,5,opt,name=vad_debug"`
-}
-
-type transcribeResp struct {
-	Text string `protobuf:"bytes,1,opt,name=text"`
-}
-
-// Minimal proto.Message stubs for grpc.Invoke
-func (r *transcribeReq) ProtoReflect() {}
-func (r *transcribeReq) Reset()        {}
-func (r *transcribeReq) String() string { return "" }
-func (r *transcribeResp) ProtoReflect() {}
-func (r *transcribeResp) Reset()        {}
-func (r *transcribeResp) String() string { return "" }
-
-func printTranscribeResult(w io.Writer, resp *transcribeResp, vadDebug bool, elapsed time.Duration, format string) error {
+func printTranscribeResult(w io.Writer, resp *pb.TranscribeResponse, vadDebug bool, elapsed time.Duration, format string) error {
 	if format == "json" {
-		_, err := fmt.Fprintf(w, "{\"text\":%q}\n", resp.Text)
+		_, err := fmt.Fprintf(w, "{\"text\":%q}\n", resp.GetText())
 		return err
 	}
-	// Default prototext
-	_, err := fmt.Fprintf(w, "text: %q\n", resp.Text)
+	_, err := fmt.Fprintf(w, "text: %q\n", resp.GetText())
 	return err
 }

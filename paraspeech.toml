@@ -7,7 +7,6 @@ shutdown_timeout = "10s"
 
 [vault]
 secrets_file = "/etc/paraspeech/secrets.env"
-enforce_isolation = true
 
 [log]
 level  = "info"

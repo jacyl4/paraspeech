@@ -45,8 +45,7 @@ func runServe() error {
 
 	// Vault
 	v, err := vault.New(vault.Config{
-		SecretsFile:      cfg.Vault.SecretsFile,
-		EnforceIsolation: cfg.Vault.EnforceIsolation,
+		SecretsFile: cfg.Vault.SecretsFile,
 	})
 	if err != nil {
 		return fmt.Errorf("vault init: %w", err)
@@ -83,7 +82,7 @@ func runServe() error {
 	ttsSvc := tts.NewService(ttsProvider, adapter, cfg.TTS)
 
 	// gRPC server
-	srv := grpctransport.NewServer(cfg.Server, sttSvc, ttsSvc, adapter)
+	srv := grpctransport.NewServer(*cfg, sttSvc, ttsSvc, adapter)
 
 	// Graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

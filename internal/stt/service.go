@@ -1,6 +1,7 @@
 package stt
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -30,6 +31,7 @@ func NewService(detector vad.Detector, merger vad.SegmentMerger, provider Transc
 }
 
 func (s *Service) Transcribe(ctx context.Context, audio io.Reader, filename string) (*TranscribeResult, error) {
+	_ = filename
 	pcm, err := codec.Decode(ctx, audio)
 	if err != nil {
 		return nil, errs.Wrap(errs.ErrSTTDecodeFailed, err)
@@ -60,9 +62,14 @@ func (s *Service) Transcribe(ctx context.Context, audio io.Reader, filename stri
 		vadMeta = &VadMeta{Enabled: false, Reason: "vad_off"}
 	}
 
+	wavAudio, err := toWAVAudio(trimmedAudio)
+	if err != nil {
+		return nil, errs.Wrap(errs.ErrSTTDecodeFailed, err)
+	}
+
 	result, err := s.provider.Transcribe(ctx, &TranscribeRequest{
-		Audio:    trimmedAudio,
-		Filename: filename,
+		Audio:    bytes.NewReader(wavAudio),
+		Filename: "audio.wav",
 		Model:    s.cfg.DefaultModel,
 	})
 	if err != nil {
@@ -70,6 +77,11 @@ func (s *Service) Transcribe(ctx context.Context, audio io.Reader, filename stri
 	}
 	result.VadMeta = vadMeta
 	return result, nil
+}
+
+func toWAVAudio(r io.Reader) ([]byte, error) {
+	// ffmpeg Decode already normalized to 16kHz mono s16le.
+	return codec.PCMReaderToWAV(r, 16000, 1, 16)
 }
 
 func (s *Service) vadProcess(pcm io.ReadCloser) (io.Reader, *VadMeta, error) {

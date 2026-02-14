@@ -2,10 +2,12 @@ package grpc
 
 import (
 	"context"
+	"io"
 	"sync"
 	"time"
 
-	"google.golang.org/grpc"
+	pb "paraspeech/api/proto/paraspeech/v1"
+	gogrpc "google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -15,29 +17,72 @@ import (
 )
 
 type ttsHandler struct {
+	pb.UnimplementedTTSServiceServer
 	svc     *tts.Service
 	adapter voice.ProviderAdapter
 	wg      *sync.WaitGroup
 }
 
-func registerTTSHandler(s *grpc.Server, svc *tts.Service, adapter voice.ProviderAdapter, wg *sync.WaitGroup) {
-	_ = &ttsHandler{svc: svc, adapter: adapter, wg: wg}
+func registerTTSHandler(s *gogrpc.Server, svc *tts.Service, adapter voice.ProviderAdapter, wg *sync.WaitGroup) {
+	pb.RegisterTTSServiceServer(s, &ttsHandler{svc: svc, adapter: adapter, wg: wg})
 }
 
-func (h *ttsHandler) Synthesize(ctx context.Context, text string, profile *voice.VoiceProfile, model, format string) (*tts.SynthesizeResult, string, error) {
+func (h *ttsHandler) Synthesize(ctx context.Context, req *pb.SynthesizeRequest) (*pb.SynthesizeResponse, error) {
 	h.wg.Add(1)
 	defer h.wg.Done()
 
 	traceID := observe.NewTraceID()
-	_ = time.Now()
+	start := time.Now()
 
-	if text == "" {
-		return nil, traceID, status.Error(codes.InvalidArgument, "empty text")
+	if req.GetText() == "" {
+		return nil, status.Error(codes.InvalidArgument, "empty text")
 	}
 
-	result, err := h.svc.Synthesize(ctx, text, profile)
+	profile := &voice.VoiceProfile{
+		Voice:   req.GetVoiceProfile().GetVoice(),
+		Speed:   req.GetVoiceProfile().GetSpeed(),
+		Emotion: req.GetVoiceProfile().GetEmotion(),
+		Pitch:   req.GetVoiceProfile().GetPitch(),
+		Style:   req.GetVoiceProfile().GetStyle(),
+		Custom:  req.GetVoiceProfile().GetCustom(),
+	}
+	result, err := h.svc.Synthesize(ctx, req.GetText(), profile)
 	if err != nil {
-		return nil, traceID, status.Errorf(codes.Internal, "synthesize: %v", err)
+		return nil, status.Errorf(codes.Internal, "synthesize: %v", err)
 	}
-	return result, traceID, nil
+
+	audioBytes, err := io.ReadAll(result.Audio)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "read synthesized audio: %v", err)
+	}
+
+	resp := &pb.SynthesizeResponse{
+		Count: 1,
+		Segments: []*pb.SynthesizeSegment{
+			{
+				Index:       0,
+				Text:        req.GetText(),
+				Audio:       audioBytes,
+				SizeBytes:   int64(len(audioBytes)),
+				ContentType: result.ContentType,
+			},
+		},
+		Meta: &pb.SynthesizeMeta{
+			TraceId:   traceID,
+			Model:     req.GetModel(),
+			MaxSec:    req.GetMaxSec(),
+			ProcessMs: time.Since(start).Milliseconds(),
+		},
+	}
+	return resp, nil
+}
+
+func (h *ttsHandler) Preview(context.Context, *pb.PreviewRequest) (*pb.PreviewResponse, error) {
+	return &pb.PreviewResponse{
+		Count: 0,
+	}, nil
+}
+
+func (h *ttsHandler) SynthesizeStream(*pb.SynthesizeRequest, gogrpc.ServerStreamingServer[pb.SynthesizeEvent]) error {
+	return status.Error(codes.Unimplemented, "SynthesizeStream is not implemented")
 }

@@ -75,7 +75,7 @@ paraspeech/
 │   ├── observe/                    # 日志（敏感字段 redact）、trace、metrics
 │   └── errs/                       # 统一错误码
 ├── api/proto/paraspeech/v1/        # Proto 定义（stt, tts, health, common）
-├── configs/                        # paraspeech.toml + systemd unit
+├── configs/                        # systemd unit 模板
 ├── scripts/                        # CLI wrapper（兼容旧命令名）
 ├── third_party/ten-vad/            # TEN VAD 预编译库 + 版本锁定
 ├── Makefile
@@ -90,7 +90,7 @@ paraspeech/
 
 ```bash
 # 编译
-make build          # → bin/paraspeech
+make build          # → ./paraspeech
 
 # 测试
 make test           # go test ./internal/... -race -cover
@@ -115,10 +115,10 @@ sudo useradd -r -s /usr/sbin/nologin paraspeech
 ### 2. 安装二进制与配置
 
 ```bash
-sudo install -m 755 bin/paraspeech /usr/local/bin/paraspeech
+sudo install -m 755 paraspeech /usr/local/bin/paraspeech
 
 sudo mkdir -p /etc/paraspeech
-sudo cp configs/paraspeech.toml /etc/paraspeech/
+sudo cp paraspeech.toml /etc/paraspeech/
 sudo chmod 644 /etc/paraspeech/paraspeech.toml
 ```
 
@@ -134,11 +134,9 @@ sudo vim /etc/paraspeech/secrets.env
 内容格式：
 
 ```env
-PARASPEECH_STT_KEY=sk-xxx-stt-dedicated
-PARASPEECH_TTS_KEY=sk-xxx-tts-dedicated
+PARASPEECH_STT_KEY=sk-xxx
+PARASPEECH_TTS_KEY=sk-xxx
 ```
-
-STT 与 TTS 必须使用不同的 API Key（隔离检查默认开启）。
 
 ### 4. 验证权限隔离
 
@@ -171,13 +169,13 @@ sudo vim /etc/paraspeech/secrets.env     # 编辑新密钥
 sudo systemctl reload paraspeech         # SIGHUP 热重载
 ```
 
-热重载流程：权限预检 → 解析 → 隔离检查 → mlock → 原子替换 → memzero 旧密钥。校验失败时保留旧密钥继续服务。
+热重载流程：权限预检 → 解析 → mlock → 原子替换 → memzero 旧密钥。校验失败时保留旧密钥继续服务。
 
 ---
 
 ## 配置
 
-主配置文件 `/etc/paraspeech/paraspeech.toml`，完整模板见 `configs/paraspeech.toml`。
+主配置文件 `/etc/paraspeech/paraspeech.toml`，完整模板见 `paraspeech.toml`。
 
 关键配置项：
 
@@ -306,7 +304,7 @@ paraspeech health
 # 输出示例
 # ok: true
 # service: "paraspeech"
-# version: "0.1.0"
+# version: "v1.0.0.0"
 ```
 
 ### 版本
@@ -320,6 +318,24 @@ paraspeech version
 ```bash
 paraspeech-transcribe /path/to/audio.ogg    # 等同 paraspeech transcribe
 paraspeech-synthesize --text "..."           # 等同 paraspeech synthesize
+```
+
+### grpcurl 调试
+
+```bash
+# Health
+grpcurl -plaintext \
+  -import-path api/proto \
+  -proto paraspeech/v1/health.proto \
+  -d '{}' \
+  127.0.0.1:9800 paraspeech.v1.HealthService/Check
+
+# STT
+grpcurl -plaintext \
+  -import-path api/proto \
+  -proto paraspeech/v1/stt.proto \
+  -d '{"audio":"AA==","filename":"sample.wav"}' \
+  127.0.0.1:9800 paraspeech.v1.STTService/Transcribe
 ```
 
 ---
@@ -341,7 +357,6 @@ paraspeech-synthesize --text "..."           # 等同 paraspeech synthesize
 | 301 | TTS_SPLIT_FAILED | 分段失败 |
 | 310 | TTS_UPSTREAM | 上游 TTS 错误 |
 | 400 | VAULT_MISSING | 密钥缺失 |
-| 401 | VAULT_ISOLATION | 密钥隔离检查失败 |
 
 ---
 

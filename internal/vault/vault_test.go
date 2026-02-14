@@ -19,7 +19,7 @@ func writeSecretsFile(t *testing.T, content string, mode os.FileMode) string {
 
 func TestNew_Success(t *testing.T) {
 	path := writeSecretsFile(t, "PARASPEECH_STT_KEY=sk-stt-test\nPARASPEECH_TTS_KEY=sk-tts-test\n", 0o640)
-	v, err := New(Config{SecretsFile: path, EnforceIsolation: true})
+	v, err := New(Config{SecretsFile: path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,17 +58,9 @@ func TestNew_MissingSTTKey(t *testing.T) {
 	}
 }
 
-func TestNew_IsolationViolation(t *testing.T) {
+func TestNew_SameKeyAllowed(t *testing.T) {
 	path := writeSecretsFile(t, "PARASPEECH_STT_KEY=same-key\nPARASPEECH_TTS_KEY=same-key\n", 0o640)
-	_, err := New(Config{SecretsFile: path, EnforceIsolation: true})
-	if err == nil {
-		t.Fatal("expected error for same STT/TTS key")
-	}
-}
-
-func TestNew_IsolationNotEnforced(t *testing.T) {
-	path := writeSecretsFile(t, "PARASPEECH_STT_KEY=same-key\nPARASPEECH_TTS_KEY=same-key\n", 0o640)
-	v, err := New(Config{SecretsFile: path, EnforceIsolation: false})
+	v, err := New(Config{SecretsFile: path})
 	if err != nil {
 		t.Fatal(err)
 	}

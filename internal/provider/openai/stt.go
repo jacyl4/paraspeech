@@ -50,7 +50,7 @@ func (s *STT) Transcribe(ctx context.Context, req *stt.TranscribeRequest) (*stt.
 	if req.Prompt != "" {
 		_ = w.WriteField("prompt", req.Prompt)
 	}
-	_ = w.WriteField("response_format", "verbose_json")
+	_ = w.WriteField("response_format", "json")
 	w.Close()
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.Endpoint, &body)
