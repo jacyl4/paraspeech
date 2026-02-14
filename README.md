@@ -1,6 +1,6 @@
 # ParaSpeech
 
-统一语音中间件 — 将 STT 与 TTS 合并为单一 Go 二进制。
+统一语音中间件 — 将 STT 与 TTS 合并为单一组件。
 
 单进程、双通道、gRPC + CLI 双入口、零密钥暴露。
 
