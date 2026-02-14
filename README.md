@@ -440,4 +440,4 @@ grpcurl -plaintext \
 
 ## License
 
-Internal project.
+MIT License. See `LICENSE`.
