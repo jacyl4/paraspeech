@@ -77,10 +77,33 @@ func (h *ttsHandler) Synthesize(ctx context.Context, req *pb.SynthesizeRequest) 
 	return resp, nil
 }
 
-func (h *ttsHandler) Preview(context.Context, *pb.PreviewRequest) (*pb.PreviewResponse, error) {
-	return &pb.PreviewResponse{
-		Count: 0,
-	}, nil
+func (h *ttsHandler) Preview(_ context.Context, req *pb.PreviewRequest) (*pb.PreviewResponse, error) {
+	if req.GetText() == "" {
+		return nil, status.Error(codes.InvalidArgument, "empty text")
+	}
+
+	cleaned := tts.Sanitize(req.GetText())
+	if cleaned == "" {
+		return &pb.PreviewResponse{Count: 0}, nil
+	}
+
+	maxSec := req.GetMaxSec()
+	if maxSec <= 0 {
+		maxSec = 25.0
+	}
+	segments := tts.Split(cleaned, maxSec)
+
+	resp := &pb.PreviewResponse{
+		Count: int32(len(segments)),
+	}
+	for i, seg := range segments {
+		resp.Segments = append(resp.Segments, &pb.PreviewSegment{
+			Index:        int32(i),
+			Text:         seg.Text,
+			EstimatedSec: seg.EstimatedSec,
+		})
+	}
+	return resp, nil
 }
 
 func (h *ttsHandler) SynthesizeStream(*pb.SynthesizeRequest, gogrpc.ServerStreamingServer[pb.SynthesizeEvent]) error {
