@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package paraspeech.v1;
+
+option go_package = "paraspeech/api/proto/paraspeech/v1;paraspeechv1";
+
+service STTService {
+    rpc Transcribe(TranscribeRequest) returns (TranscribeResponse);
+    rpc TranscribeStream(stream AudioFrame) returns (stream TranscribeEvent);
+}
+
+message TranscribeRequest {
+    bytes audio = 1;
+    string filename = 2;
+    string language = 3;
+    string model = 4;
+    bool vad_debug = 5;
+}
+
+message TranscribeResponse {
+    string text = 1;
+    TranscribeMeta meta = 2;
+}
+
+message TranscribeMeta {
+    string trace_id = 1;
+    int64 audio_ms = 2;
+    int64 process_ms = 3;
+    VadMeta vad = 4;
+}
+
+message VadMeta {
+    bool enabled = 1;
+    string reason = 2;
+    bool fallback = 3;
+    int64 audio_ms_before = 4;
+    int64 audio_ms_after = 5;
+    double trim_ratio = 6;
+    int32 segments_count = 7;
+    int64 elapsed_ms = 8;
+}
+
+message AudioFrame {
+    bytes data = 1;
+    bool end_of_audio = 2;
+}
+
+message TranscribeEvent {
+    oneof event {
+        PartialResult partial = 1;
+        FinalResult final = 2;
+        TranscribeError error = 3;
+    }
+}
+
+message PartialResult {
+    int32 index = 1;
+    double start_sec = 2;
+    double end_sec = 3;
+    string text = 4;
+    string accumulated_text = 5;
+}
+
+message FinalResult {
+    string text = 1;
+    int32 chunks = 2;
+    TranscribeMeta meta = 3;
+}
+
+message TranscribeError {
+    int32 code = 1;
+    string message = 2;
+}

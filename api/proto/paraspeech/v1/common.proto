@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package paraspeech.v1;
+
+option go_package = "paraspeech/api/proto/paraspeech/v1;paraspeechv1";
+
+message ErrorDetail {
+    int32 code = 1;
+    string code_name = 2;
+    string message = 3;
+    map<string, string> details = 4;
+}

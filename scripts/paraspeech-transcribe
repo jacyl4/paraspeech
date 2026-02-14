@@ -1,0 +1,3 @@
+#!/bin/sh
+# CLI wrapper for OpenClaw: paraspeech-transcribe <audio-file>
+exec paraspeech transcribe "$@"

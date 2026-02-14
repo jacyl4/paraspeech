@@ -1,0 +1,76 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"time"
+
+	"github.com/spf13/cobra"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	"paraspeech/internal/config"
+)
+
+func newHealthCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "health",
+		Short: "Check service health (delegates to serve via gRPC)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runHealth()
+		},
+	}
+}
+
+func runHealth() error {
+	cfg, err := config.Load(configFile)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := grpc.NewClient(cfg.Server.GRPCAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		return fmt.Errorf("connect to serve: %w (is 'paraspeech serve' running?)", err)
+	}
+	defer conn.Close()
+
+	var resp healthResp
+	err = conn.Invoke(ctx, "/paraspeech.v1.HealthService/Check", &healthReq{}, &resp)
+	if err != nil {
+		return fmt.Errorf("health check failed: %w", err)
+	}
+
+	return printHealthResult(os.Stdout, &resp, format)
+}
+
+type healthReq struct{}
+type healthResp struct {
+	Ok      bool   `protobuf:"varint,1,opt,name=ok"`
+	Service string `protobuf:"bytes,2,opt,name=service"`
+	Version string `protobuf:"bytes,3,opt,name=version"`
+}
+
+func (r *healthReq) ProtoReflect()   {}
+func (r *healthReq) Reset()          {}
+func (r *healthReq) String() string  { return "" }
+func (r *healthResp) ProtoReflect()  {}
+func (r *healthResp) Reset()         {}
+func (r *healthResp) String() string { return "" }
+
+func printHealthResult(w io.Writer, resp *healthResp, format string) error {
+	if format == "json" {
+		_, err := fmt.Fprintf(w, "{\"ok\":%t,\"service\":%q,\"version\":%q}\n",
+			resp.Ok, resp.Service, resp.Version)
+		return err
+	}
+	_, err := fmt.Fprintf(w, "ok: %t\nservice: %q\nversion: %q\n",
+		resp.Ok, resp.Service, resp.Version)
+	return err
+}

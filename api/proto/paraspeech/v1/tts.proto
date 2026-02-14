@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package paraspeech.v1;
+
+option go_package = "paraspeech/api/proto/paraspeech/v1;paraspeechv1";
+
+service TTSService {
+    rpc Synthesize(SynthesizeRequest) returns (SynthesizeResponse);
+    rpc SynthesizeStream(SynthesizeRequest) returns (stream SynthesizeEvent);
+    rpc Preview(PreviewRequest) returns (PreviewResponse);
+}
+
+message SynthesizeRequest {
+    string text = 1;
+    string session = 2;
+    VoiceProfile voice_profile = 3;
+    string model = 4;
+    string format = 5;
+    double max_sec = 6;
+    string out_dir = 7;
+}
+
+message VoiceProfile {
+    string voice = 1;
+    double speed = 2;
+    string emotion = 3;
+    string pitch = 4;
+    string style = 5;
+    map<string, string> custom = 6;
+}
+
+message SynthesizeResponse {
+    int32 count = 1;
+    repeated SynthesizeSegment segments = 2;
+    SynthesizeMeta meta = 3;
+}
+
+message SynthesizeSegment {
+    int32 index = 1;
+    string text = 2;
+    double estimated_sec = 3;
+    bytes audio = 4;
+    string path = 5;
+    int64 size_bytes = 6;
+    string content_type = 7;
+}
+
+message SynthesizeMeta {
+    string trace_id = 1;
+    VoiceProfile voice_profile = 2;
+    string model = 3;
+    double max_sec = 4;
+    int64 process_ms = 5;
+}
+
+message SynthesizeEvent {
+    oneof event {
+        AudioChunk chunk = 1;
+        SegmentDone segment_done = 2;
+        SynthesizeMeta final_meta = 3;
+        SynthesizeError error = 4;
+    }
+}
+
+message AudioChunk {
+    int32 segment_index = 1;
+    bytes data = 2;
+    string content_type = 3;
+}
+
+message SegmentDone {
+    int32 index = 1;
+    string text = 2;
+    double estimated_sec = 3;
+    int64 size_bytes = 4;
+    string path = 5;
+}
+
+message SynthesizeError {
+    int32 code = 1;
+    string message = 2;
+}
+
+message PreviewRequest {
+    string text = 1;
+    double max_sec = 2;
+}
+
+message PreviewResponse {
+    int32 count = 1;
+    repeated PreviewSegment segments = 2;
+}
+
+message PreviewSegment {
+    int32 index = 1;
+    string text = 2;
+    double estimated_sec = 3;
+}

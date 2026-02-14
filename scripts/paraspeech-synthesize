@@ -1,0 +1,3 @@
+#!/bin/sh
+# CLI wrapper for OpenClaw: paraspeech-synthesize --text "..."
+exec paraspeech synthesize "$@"

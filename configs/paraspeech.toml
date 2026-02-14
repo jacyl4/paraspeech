@@ -1,0 +1,84 @@
+# /etc/paraspeech/paraspeech.toml
+
+[server]
+grpc_addr    = "127.0.0.1:9800"
+metrics_addr = "127.0.0.1:9801"
+shutdown_timeout = "10s"
+
+[vault]
+secrets_file = "/etc/paraspeech/secrets.env"
+enforce_isolation = true
+
+[log]
+level  = "info"
+format = "json"
+output = "stderr"
+file   = ""
+
+[stt]
+enabled         = true
+max_bytes       = 26214400
+timeout         = "90s"
+default_model   = "gpt-4o-mini-transcribe"
+max_concurrent  = 10
+
+[stt.vad]
+mode            = "on"
+hop_size        = 256
+threshold       = 0.5
+min_speech_ms   = 200
+min_silence_ms  = 300
+pad_ms          = 150
+max_gap_ms      = 500
+max_audio_sec   = 45
+min_trim_ratio  = 0.3
+
+[stt.stream]
+enabled         = true
+chunk_sec       = 8.0
+overlap_sec     = 1.0
+max_chunks      = 12
+
+[stt.upstream]
+provider        = "openai"
+endpoint        = "https://api.openai.com/v1/audio/transcriptions"
+connect_timeout = "5s"
+read_timeout    = "90s"
+max_connections = 20
+max_keepalive   = 10
+prewarm_on_start = true
+prewarm_on_task  = true
+prewarm_fail_open = true
+prewarm_timeout   = "800ms"
+
+[tts]
+enabled         = true
+max_body        = 524288
+timeout         = "45s"
+default_model   = "gpt-4o-mini-tts"
+default_voice   = "nova"
+default_speed   = 1.22
+default_emotion = "neutral"
+default_style   = "conversational"
+default_format  = "opus"
+max_sec         = 25.0
+max_concurrent  = 10
+out_dir         = ""
+
+[tts.upstream]
+provider        = "openai"
+endpoint        = "https://api.openai.com/v1/audio/speech"
+connect_timeout = "5s"
+read_timeout    = "45s"
+max_connections = 20
+max_keepalive   = 10
+prewarm_on_start = true
+prewarm_on_task  = true
+prewarm_fail_open = true
+prewarm_timeout   = "800ms"
+
+[queue]
+stt_burst       = 20
+stt_rate        = 10.0
+tts_burst       = 20
+tts_rate        = 10.0
