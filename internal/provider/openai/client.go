@@ -3,6 +3,7 @@ package openai
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -17,24 +18,31 @@ type SharedClient struct {
 
 func NewSharedClient(v vault.Vault, cfg config.Upstream) *SharedClient {
 	transport := &http.Transport{
-		MaxIdleConns:        cfg.MaxConnections,
-		MaxIdleConnsPerHost: cfg.MaxKeepalive,
-		IdleConnTimeout:     90 * time.Second,
-		ForceAttemptHTTP2:   true,
+		MaxIdleConns:          cfg.MaxConnections,
+		MaxIdleConnsPerHost:   cfg.MaxKeepalive,
+		IdleConnTimeout:       90 * time.Second,
+		ForceAttemptHTTP2:     true,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: 0,
+		DisableCompression:    true,
+		WriteBufferSize:       64 * 1024,
+		ReadBufferSize:        16 * 1024,
+		DialContext: (&net.Dialer{
+			Timeout:   cfg.ConnectTimeout,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
 	}
 	return &SharedClient{
-		client: &http.Client{
-			Transport: transport,
-			Timeout:   cfg.ReadTimeout,
-		},
-		vault: v,
+		client: &http.Client{Transport: transport},
+		vault:  v,
 	}
 }
 
 func (c *SharedClient) Prewarm(ctx context.Context, endpoint string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodOptions, endpoint, nil)
 	if err != nil {
 		return err
 	}

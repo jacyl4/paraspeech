@@ -45,6 +45,67 @@ func Decode(ctx context.Context, input io.Reader) (io.ReadCloser, error) {
 	return &ffmpegReader{cmd: cmd, reader: stdout}, nil
 }
 
+// RemuxToWebm remuxes input audio into a webm container without audio re-encode.
+func RemuxToWebm(ctx context.Context, input io.Reader) (io.ReadCloser, error) {
+	cmd := exec.CommandContext(ctx,
+		"ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-i", "pipe:0",
+		"-c:a", "copy",
+		"-f", "webm",
+		"pipe:1",
+	)
+	cmd.Stdin = input
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg stdout pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("ffmpeg start: %w", err)
+	}
+	return &ffmpegReader{cmd: cmd, reader: stdout}, nil
+}
+
+// EncodeToWebmOpus encodes 16kHz mono s16le PCM to webm/opus.
+func EncodeToWebmOpus(ctx context.Context, pcmInput io.Reader) (io.ReadCloser, error) {
+	cmd := exec.CommandContext(ctx,
+		"ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-f", "s16le", "-ar", "16000", "-ac", "1",
+		"-i", "pipe:0",
+		"-c:a", "libopus", "-b:a", "32k",
+		"-f", "webm",
+		"pipe:1",
+	)
+	cmd.Stdin = pcmInput
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg stdout pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("ffmpeg start: %w", err)
+	}
+	return &ffmpegReader{cmd: cmd, reader: stdout}, nil
+}
+
+// TranscodeToWebmOpus transcodes input audio stream to webm/opus.
+func TranscodeToWebmOpus(ctx context.Context, input io.Reader) (io.ReadCloser, error) {
+	cmd := exec.CommandContext(ctx,
+		"ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-i", "pipe:0",
+		"-c:a", "libopus", "-b:a", "32k",
+		"-f", "webm",
+		"pipe:1",
+	)
+	cmd.Stdin = input
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg stdout pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("ffmpeg start: %w", err)
+	}
+	return &ffmpegReader{cmd: cmd, reader: stdout}, nil
+}
+
 // ReadFrames reads fixed-size int16 frames from a raw PCM stream.
 func ReadFrames(pcm io.Reader, hopSize int) <-chan []int16 {
 	ch := make(chan []int16, 64)

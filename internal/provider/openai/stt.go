@@ -1,13 +1,12 @@
 package openai
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
+	"strings"
 
 	"paraspeech/internal/config"
 	"paraspeech/internal/stt"
@@ -26,87 +25,147 @@ func NewSTT(v vault.Vault, cfg config.Upstream) *STT {
 	}
 }
 
-func (s *STT) Transcribe(ctx context.Context, req *stt.TranscribeRequest) (*stt.TranscribeResult, error) {
-	var body bytes.Buffer
-	w := multipart.NewWriter(&body)
+func (s *STT) transcribeSSE(ctx context.Context, req *stt.TranscribeRequest) (<-chan SSEEvent, <-chan error, error) {
+	pr, pw := io.Pipe()
+	mpWriter := multipart.NewWriter(pw)
+	contentType := mpWriter.FormDataContentType()
 
-	filename := req.Filename
-	if filename == "" {
-		filename = "audio.wav"
-	}
+	go func() {
+		defer pw.Close()
+		defer mpWriter.Close()
 
-	part, err := w.CreateFormFile("file", filename)
+		if err := mpWriter.WriteField("model", req.Model); err != nil {
+			pw.CloseWithError(fmt.Errorf("write model field: %w", err))
+			return
+		}
+		if err := mpWriter.WriteField("response_format", "text"); err != nil {
+			pw.CloseWithError(fmt.Errorf("write response_format field: %w", err))
+			return
+		}
+		if err := mpWriter.WriteField("stream", "true"); err != nil {
+			pw.CloseWithError(fmt.Errorf("write stream field: %w", err))
+			return
+		}
+		if req.Language != "" {
+			if err := mpWriter.WriteField("language", req.Language); err != nil {
+				pw.CloseWithError(fmt.Errorf("write language field: %w", err))
+				return
+			}
+		}
+		if req.Prompt != "" {
+			if err := mpWriter.WriteField("prompt", req.Prompt); err != nil {
+				pw.CloseWithError(fmt.Errorf("write prompt field: %w", err))
+				return
+			}
+		}
+
+		filename := req.Filename
+		if filename == "" {
+			filename = "audio.webm"
+		}
+		part, err := mpWriter.CreateFormFile("file", filename)
+		if err != nil {
+			pw.CloseWithError(fmt.Errorf("create form file: %w", err))
+			return
+		}
+		if _, err := io.Copy(part, req.Audio); err != nil {
+			pw.CloseWithError(fmt.Errorf("copy audio: %w", err))
+			return
+		}
+	}()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.Endpoint, pr)
 	if err != nil {
-		return nil, fmt.Errorf("create form file: %w", err)
+		return nil, nil, fmt.Errorf("create request: %w", err)
 	}
-	if _, err := io.Copy(part, req.Audio); err != nil {
-		return nil, fmt.Errorf("copy audio: %w", err)
-	}
-
-	_ = w.WriteField("model", req.Model)
-	if req.Language != "" {
-		_ = w.WriteField("language", req.Language)
-	}
-	if req.Prompt != "" {
-		_ = w.WriteField("prompt", req.Prompt)
-	}
-	_ = w.WriteField("response_format", "json")
-	w.Close()
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.Endpoint, &body)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", w.FormDataContentType())
+	httpReq.Header.Set("Content-Type", contentType)
 
 	resp, err := s.client.do(httpReq, vault.KeySTT)
 	if err != nil {
-		return nil, fmt.Errorf("upstream request: %w", err)
+		return nil, nil, fmt.Errorf("upstream request: %w", err)
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("upstream %d: %s", resp.StatusCode, string(respBody))
+		resp.Body.Close()
+		return nil, nil, fmt.Errorf("upstream %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 
-	var apiResp struct {
-		Text     string  `json:"text"`
-		Duration float64 `json:"duration"`
-		Segments []struct {
-			ID    int     `json:"id"`
-			Start float64 `json:"start"`
-			End   float64 `json:"end"`
-			Text  string  `json:"text"`
-		} `json:"segments"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+	eventCh := make(chan SSEEvent, 64)
+	errCh := make(chan error, 1)
+	go func() {
+		defer resp.Body.Close()
+		defer close(eventCh)
+		defer close(errCh)
+		errCh <- ParseSSEStream(resp.Body, eventCh)
+	}()
+
+	return eventCh, errCh, nil
+}
+
+func (s *STT) Transcribe(ctx context.Context, req *stt.TranscribeRequest) (*stt.TranscribeResult, error) {
+	eventCh, errCh, err := s.transcribeSSE(ctx, req)
+	if err != nil {
+		return nil, err
 	}
 
-	result := &stt.TranscribeResult{
-		Text:       apiResp.Text,
-		DurationMS: int64(apiResp.Duration * 1000),
+	var text strings.Builder
+	for event := range eventCh {
+		switch event.Type {
+		case "transcript.text.delta":
+			text.WriteString(event.Delta)
+		case "transcript.text.done":
+			if event.Text != "" {
+				return &stt.TranscribeResult{Text: event.Text}, nil
+			}
+		case "error":
+			if event.Error != "" {
+				return nil, fmt.Errorf("upstream stream error: %s", event.Error)
+			}
+		}
 	}
-	for _, s := range apiResp.Segments {
-		result.Segments = append(result.Segments, stt.Segment{
-			Index:   s.ID,
-			StartMS: int64(s.Start * 1000),
-			EndMS:   int64(s.End * 1000),
-			Text:    s.Text,
-		})
+
+	if parseErr := <-errCh; parseErr != nil {
+		return nil, fmt.Errorf("parse sse: %w", parseErr)
 	}
-	return result, nil
+	return &stt.TranscribeResult{Text: text.String()}, nil
+}
+
+func (s *STT) TranscribeStreamSSE(ctx context.Context, req *stt.TranscribeRequest, out chan<- string) error {
+	eventCh, errCh, err := s.transcribeSSE(ctx, req)
+	if err != nil {
+		return err
+	}
+
+	for event := range eventCh {
+		switch event.Type {
+		case "transcript.text.delta":
+			out <- event.Delta
+		case "transcript.text.done":
+			if parseErr := <-errCh; parseErr != nil {
+				return fmt.Errorf("parse sse: %w", parseErr)
+			}
+			return nil
+		case "error":
+			if event.Error != "" {
+				return fmt.Errorf("upstream stream error: %s", event.Error)
+			}
+		}
+	}
+
+	if parseErr := <-errCh; parseErr != nil {
+		return fmt.Errorf("parse sse: %w", parseErr)
+	}
+	return nil
 }
 
 func (s *STT) TranscribeStream(ctx context.Context, req *stt.TranscribeRequest, out chan<- *stt.Segment) error {
-	// OpenAI currently only supports batch upload — accumulate then submit.
 	result, err := s.Transcribe(ctx, req)
 	if err != nil {
 		return err
 	}
-	for i := range result.Segments {
-		out <- &result.Segments[i]
+	if result.Text != "" {
+		out <- &stt.Segment{Index: 0, Text: result.Text}
 	}
 	return nil
 }

@@ -15,6 +15,7 @@ message TranscribeRequest {
     string language = 3;
     string model = 4;
     bool vad_debug = 5;
+    double duration_hint = 6;
 }
 
 message TranscribeResponse {
@@ -43,6 +44,10 @@ message VadMeta {
 message AudioFrame {
     bytes data = 1;
     bool end_of_audio = 2;
+    double duration_hint = 3;
+    string language = 4;
+    string model = 5;
+    bool vad_debug = 6;
 }
 
 message TranscribeEvent {

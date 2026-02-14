@@ -13,7 +13,7 @@
                        │
           ┌────────────┴────────────┐
           │    gRPC :9800           │   CLI 子命令
-          │  unary + stream         │  （委托 gRPC）
+          │   （当前 unary）         │  （委托 gRPC）
           └────────────┬────────────┘
                        │
     ┌──────────────────┴──────────────────┐
@@ -46,19 +46,17 @@
 
 ### 业务链路（STT）
 
-1. 客户端调用 `STTService.Transcribe`（Unary）或 `STTService.TranscribeStream`（Bidi Stream）。
-2. 服务按 `duration_hint`（主）+ `direct_max_bytes`（兜底）选择路径：
-   - 路径 A（短音频）：优先 `ogg/opus -> webm/opus` 转封装；其他格式流式转码为 `webm/opus`。
-   - 路径 B（长音频）：解码为 `16kHz/mono/s16le` 后执行 VAD（Unary 用全量 VAD，Stream 用在线 VAD）并编码 `webm/opus`。
-3. 上游统一走 OpenAI STT `multipart + stream=true`。
-4. OpenAI 返回 SSE：`transcript.text.delta` / `transcript.text.done`。
-5. Stream RPC 逐条下发 partial，Unary 内部聚合后一次性返回 text（可选 VAD meta）。
+1. 客户端调用 `STTService.Transcribe` 或 `paraspeech transcribe`。
+2. 服务先将任意输入音频统一解码为 `16kHz / mono / s16le`。
+3. 若 `vad.mode != off`，执行 VAD 裁剪并生成 VAD 元数据。
+4. 将 PCM 封装为标准 WAV 后上传 OpenAI STT。
+5. 返回文本与元信息（trace/process/vad），CLI 默认只输出 `text`。
 
 设计要点：
 
-- OpenAI transcriptions 官方支持 `webm`，不含 `ogg`，因此统一上传 `webm/opus`。
-- `stream=true` 同时用于 Unary 和 Stream，缩短首字延迟。
-- VAD 失败时有回退，不阻断主链路。
+- 输入格式不可信，先统一解码再处理。
+- 上游识别以 WAV 容器作为稳定交付格式。
+- VAD 失败时走回退，不阻断主链路。
 
 ### 业务链路（TTS）
 
@@ -83,11 +81,10 @@
 ### 当前接口实现状态
 
 - 已实现：`STTService.Transcribe`（unary）
-- 已实现：`STTService.TranscribeStream`（bidi stream）
 - 已实现：`TTSService.Synthesize`（unary）
 - 已实现：`TTSService.Preview`（unary，返回真实清洗+分段结果）
 - 已实现：`HealthService.Check`（unary）
-- 未实现：`TTSService.SynthesizeStream`（调用会返回 `Unimplemented`）
+- 未实现：`STTService.TranscribeStream`、`TTSService.SynthesizeStream`（调用会返回 `Unimplemented`）
 
 ### 实现映射（最小）
 
@@ -192,42 +189,10 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now paraspeech
 ```
 
-### 5.1 （可选但推荐）启用 TEN VAD 运行库
-
-如果不安装 `libten_vad.so`，服务会自动降级为 `vad.mode=off`。
-
-```bash
-# 示例：系统已安装 Python ten_vad 包时，直接拷贝其动态库
-sudo install -m 755 /usr/local/lib/python3.13/dist-packages/ten_vad/lib/Linux/x64/libten_vad.so /usr/local/lib/libten_vad.so
-
-# 刷新动态链接缓存
-sudo ldconfig
-
-# 重启服务使库加载生效
-sudo systemctl restart paraspeech
-```
-
-也可以不复制文件，直接在 `paraspeech.service` 增加：
-
-```ini
-[Service]
-Environment="TEN_VAD_LIB=/absolute/path/libten_vad.so"
-```
-
-然后执行：
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart paraspeech
-```
-
 ### 6. 验证服务
 
 ```bash
 paraspeech health
-
-# 验证 TEN VAD 已加载（应无 "vad=off"/"not available" 告警）
-sudo journalctl -u paraspeech -n 50 --no-pager | rg "TEN VAD|vad=off|not available"
 ```
 
 ### 密钥轮换（零停机）
@@ -252,11 +217,9 @@ sudo systemctl reload paraspeech         # SIGHUP 热重载
 | `server.grpc_addr` | `127.0.0.1:9800` | gRPC 监听地址（仅本地） |
 | `server.shutdown_timeout` | `10s` | 优雅停机超时 |
 | `stt.default_model` | `gpt-4o-mini-transcribe` | STT 默认模型 |
-| `stt.direct_max_bytes` | `512000` | 无 `duration_hint` 时直传/VAD 分流阈值 |
 | `stt.vad.mode` | `on` | VAD 模式：on / off / debug |
 | `stt.vad.hop_size` | `256` | TEN VAD 帧长（256=16ms @ 16kHz） |
 | `stt.vad.threshold` | `0.5` | VAD 检测阈值 [0, 1] |
-| `stt.vad.max_audio_sec` | `30` | 路径分界阈值（>=30s 走 VAD 路径） |
 | `tts.default_model` | `gpt-4o-mini-tts` | TTS 默认模型 |
 | `tts.default_voice` | `nova` | 默认音色 |
 | `tts.default_speed` | `1.22` | 默认语速 |
@@ -322,18 +285,8 @@ service STTService {
 | `language` | string | 语言提示，可选 |
 | `model` | string | 模型覆盖，可选 |
 | `vad_debug` | bool | 返回 VAD 元数据 |
-| `duration_hint` | double | 音频时长提示（秒），用于路径分流 |
 
 响应包含 `text` 和 `TranscribeMeta`（trace_id、audio_ms、process_ms、VadMeta）。
-
-`TranscribeStream` 的 `AudioFrame` 首帧支持：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `duration_hint` | double | 音频时长提示（秒） |
-| `language` | string | 语言提示 |
-| `model` | string | 模型覆盖 |
-| `vad_debug` | bool | 为 true 时 final 事件携带 meta |
 
 ### TTSService
 
@@ -390,9 +343,6 @@ paraspeech transcribe /path/to/audio.ogg
 
 # 带 VAD 调试信息
 paraspeech transcribe --vad-debug /path/to/audio.ogg
-
-# 流式转写（逐字输出）
-paraspeech transcribe --stream /path/to/audio.ogg
 
 # JSON 格式输出
 paraspeech transcribe --format json /path/to/audio.ogg
@@ -498,10 +448,9 @@ grpcurl -plaintext \
 
 使用 [TEN VAD](https://github.com/TEN-framework/ten-vad) 进行语音活动检测。
 
-- 通过 CGo + `dlopen/dlsym` 动态加载 `libten_vad`（需 `CGO_ENABLED=1`）
-- 运行时可通过 `TEN_VAD_LIB` 指定动态库绝对路径
-- 默认尝试 `libten_vad.so` / `/usr/local/lib/libten_vad.so` / `/usr/lib/libten_vad.so` / `/usr/lib64/libten_vad.so`
-- CGo 关闭或库缺失时自动降级为 `vad.mode=off`
+- 预编译库放置于 `third_party/ten-vad/`，版本锁定在 `VERSION` 文件
+- 通过 CGo 绑定（需 `CGO_ENABLED=1`）
+- 当前为 stub 实现，CGo 不可用时自动降级为 `vad.mode=off`
 - VAD 回退机制：检测失败/裁剪过度 → 原音频直传上游
 
 ---

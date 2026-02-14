@@ -29,14 +29,15 @@ type Log struct {
 }
 
 type STT struct {
-	Enabled      bool     `toml:"enabled"`
-	MaxBytes     int64    `toml:"max_bytes"`
-	Timeout      time.Duration `toml:"timeout"`
-	DefaultModel string   `toml:"default_model"`
-	MaxConcurrent int     `toml:"max_concurrent"`
-	VAD          VAD      `toml:"vad"`
-	Stream       Stream   `toml:"stream"`
-	Upstream     Upstream `toml:"upstream"`
+	Enabled        bool          `toml:"enabled"`
+	MaxBytes       int64         `toml:"max_bytes"`
+	DirectMaxBytes int64         `toml:"direct_max_bytes"`
+	Timeout        time.Duration `toml:"timeout"`
+	DefaultModel   string        `toml:"default_model"`
+	MaxConcurrent  int           `toml:"max_concurrent"`
+	VAD            VAD           `toml:"vad"`
+	Stream         Stream        `toml:"stream"`
+	Upstream       Upstream      `toml:"upstream"`
 }
 
 type VAD struct {
@@ -59,32 +60,32 @@ type Stream struct {
 }
 
 type Upstream struct {
-	Provider       string        `toml:"provider"`
-	Endpoint       string        `toml:"endpoint"`
-	ConnectTimeout time.Duration `toml:"connect_timeout"`
-	ReadTimeout    time.Duration `toml:"read_timeout"`
-	MaxConnections int           `toml:"max_connections"`
-	MaxKeepalive   int           `toml:"max_keepalive"`
-	PrewarmOnStart bool          `toml:"prewarm_on_start"`
-	PrewarmOnTask  bool          `toml:"prewarm_on_task"`
-	PrewarmFailOpen bool         `toml:"prewarm_fail_open"`
-	PrewarmTimeout time.Duration `toml:"prewarm_timeout"`
+	Provider        string        `toml:"provider"`
+	Endpoint        string        `toml:"endpoint"`
+	ConnectTimeout  time.Duration `toml:"connect_timeout"`
+	ReadTimeout     time.Duration `toml:"read_timeout"`
+	MaxConnections  int           `toml:"max_connections"`
+	MaxKeepalive    int           `toml:"max_keepalive"`
+	PrewarmOnStart  bool          `toml:"prewarm_on_start"`
+	PrewarmOnTask   bool          `toml:"prewarm_on_task"`
+	PrewarmFailOpen bool          `toml:"prewarm_fail_open"`
+	PrewarmTimeout  time.Duration `toml:"prewarm_timeout"`
 }
 
 type TTS struct {
-	Enabled        bool     `toml:"enabled"`
-	MaxBody        int64    `toml:"max_body"`
+	Enabled        bool          `toml:"enabled"`
+	MaxBody        int64         `toml:"max_body"`
 	Timeout        time.Duration `toml:"timeout"`
-	DefaultModel   string   `toml:"default_model"`
-	DefaultVoice   string   `toml:"default_voice"`
-	DefaultSpeed   float64  `toml:"default_speed"`
-	DefaultEmotion string   `toml:"default_emotion"`
-	DefaultStyle   string   `toml:"default_style"`
-	DefaultFormat  string   `toml:"default_format"`
-	MaxSec         float64  `toml:"max_sec"`
-	MaxConcurrent  int      `toml:"max_concurrent"`
-	OutDir         string   `toml:"out_dir"`
-	Upstream       Upstream `toml:"upstream"`
+	DefaultModel   string        `toml:"default_model"`
+	DefaultVoice   string        `toml:"default_voice"`
+	DefaultSpeed   float64       `toml:"default_speed"`
+	DefaultEmotion string        `toml:"default_emotion"`
+	DefaultStyle   string        `toml:"default_style"`
+	DefaultFormat  string        `toml:"default_format"`
+	MaxSec         float64       `toml:"max_sec"`
+	MaxConcurrent  int           `toml:"max_concurrent"`
+	OutDir         string        `toml:"out_dir"`
+	Upstream       Upstream      `toml:"upstream"`
 }
 
 type Queue struct {
@@ -110,11 +111,12 @@ func Defaults() *Config {
 			Output: "stderr",
 		},
 		STT: STT{
-			Enabled:       true,
-			MaxBytes:      26214400,
-			Timeout:       90 * time.Second,
-			DefaultModel:  "gpt-4o-mini-transcribe",
-			MaxConcurrent: 10,
+			Enabled:        true,
+			MaxBytes:       26214400,
+			DirectMaxBytes: 512000,
+			Timeout:        90 * time.Second,
+			DefaultModel:   "gpt-4o-mini-transcribe",
+			MaxConcurrent:  10,
 			VAD: VAD{
 				Mode:         "on",
 				HopSize:      256,
@@ -123,7 +125,7 @@ func Defaults() *Config {
 				MinSilenceMS: 300,
 				PadMS:        150,
 				MaxGapMS:     500,
-				MaxAudioSec:  45,
+				MaxAudioSec:  30,
 				MinTrimRatio: 0.3,
 			},
 			Stream: Stream{
@@ -133,16 +135,16 @@ func Defaults() *Config {
 				MaxChunks:  12,
 			},
 			Upstream: Upstream{
-				Provider:       "openai",
-				Endpoint:       "https://api.openai.com/v1/audio/transcriptions",
-				ConnectTimeout: 5 * time.Second,
-				ReadTimeout:    90 * time.Second,
-				MaxConnections: 20,
-				MaxKeepalive:   10,
-				PrewarmOnStart: true,
-				PrewarmOnTask:  true,
+				Provider:        "openai",
+				Endpoint:        "https://api.openai.com/v1/audio/transcriptions",
+				ConnectTimeout:  5 * time.Second,
+				ReadTimeout:     90 * time.Second,
+				MaxConnections:  20,
+				MaxKeepalive:    10,
+				PrewarmOnStart:  true,
+				PrewarmOnTask:   true,
 				PrewarmFailOpen: true,
-				PrewarmTimeout: 800 * time.Millisecond,
+				PrewarmTimeout:  800 * time.Millisecond,
 			},
 		},
 		TTS: TTS{
@@ -158,16 +160,16 @@ func Defaults() *Config {
 			MaxSec:         25.0,
 			MaxConcurrent:  10,
 			Upstream: Upstream{
-				Provider:       "openai",
-				Endpoint:       "https://api.openai.com/v1/audio/speech",
-				ConnectTimeout: 5 * time.Second,
-				ReadTimeout:    45 * time.Second,
-				MaxConnections: 20,
-				MaxKeepalive:   10,
-				PrewarmOnStart: true,
-				PrewarmOnTask:  true,
+				Provider:        "openai",
+				Endpoint:        "https://api.openai.com/v1/audio/speech",
+				ConnectTimeout:  5 * time.Second,
+				ReadTimeout:     45 * time.Second,
+				MaxConnections:  20,
+				MaxKeepalive:    10,
+				PrewarmOnStart:  true,
+				PrewarmOnTask:   true,
 				PrewarmFailOpen: true,
-				PrewarmTimeout: 800 * time.Millisecond,
+				PrewarmTimeout:  800 * time.Millisecond,
 			},
 		},
 		Queue: Queue{

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 
 	"paraspeech/internal/config"
 	"paraspeech/internal/stt"
@@ -32,7 +33,19 @@ func NewServer(cfg config.Config, sttSvc *stt.Service, ttsSvc *tts.Service, adap
 		ttsSvc:  ttsSvc,
 		adapter: adapter,
 	}
-	s.grpc = grpc.NewServer()
+	s.grpc = grpc.NewServer(
+		grpc.MaxRecvMsgSize(26*1024*1024),
+		grpc.MaxSendMsgSize(4*1024*1024),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			MaxConnectionIdle: 5 * time.Minute,
+			Time:              30 * time.Second,
+			Timeout:           10 * time.Second,
+		}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             10 * time.Second,
+			PermitWithoutStream: true,
+		}),
+	)
 	registerSTTHandler(s.grpc, sttSvc, &s.wg)
 	registerTTSHandler(s.grpc, ttsSvc, adapter, &s.wg)
 	registerHealthHandler(s.grpc, cfg)

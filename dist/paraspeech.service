@@ -1,0 +1,25 @@
+[Unit]
+Description=ParaSpeech STT/TTS Service
+After=network.target
+
+[Service]
+Type=simple
+User=paraspeech
+Group=paraspeech
+ExecStart=/usr/local/bin/paraspeech serve --config /etc/paraspeech/paraspeech.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=3
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/log/paraspeech
+PrivateTmp=yes
+MemoryDenyWriteExecute=no
+LimitCORE=0
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

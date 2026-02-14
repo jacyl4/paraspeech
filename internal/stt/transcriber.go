@@ -41,5 +41,6 @@ type VadMeta struct {
 
 type Transcriber interface {
 	Transcribe(ctx context.Context, req *TranscribeRequest) (*TranscribeResult, error)
+	TranscribeStreamSSE(ctx context.Context, req *TranscribeRequest, out chan<- string) error
 	TranscribeStream(ctx context.Context, req *TranscribeRequest, out chan<- *Segment) error
 }
